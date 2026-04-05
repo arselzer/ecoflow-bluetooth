@@ -1,6 +1,6 @@
 import {
   UUID_WRITE, UUID_NOTIFY, UUID_NUS_WRITE, UUID_NUS_NOTIFY,
-  MANUFACTURER_ID, BLE_NAME_PREFIXES, DEVICE_PREFIXES,
+  MANUFACTURER_ID, BLE_NAME_PREFIXES, DEVICE_PREFIXES, BLE_NAME_MAP,
   TYPE1_PREFIXES, FRAME_TYPE_COMMAND, SRC_APP, DST_DEVICE,
 } from './constants';
 import { deriveType1Keys, encryptAesCbc, decryptAesCbc, type SessionKeys } from './crypto';
@@ -29,6 +29,7 @@ export class EcoFlowConnection {
   private packetBuffer: Uint8Array = new Uint8Array(0);
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
   private autoReconnect = true;
+  private reconnectCount = 0;
 
   private handlers: ConnectionEventHandler;
 
@@ -54,6 +55,7 @@ export class EcoFlowConnection {
 
     try {
       this.autoReconnect = true;
+      this.reconnectCount = 0;
 
       // Build filter list from known prefixes
       const filters: BluetoothLEScanFilter[] = BLE_NAME_PREFIXES.map(prefix => ({
@@ -124,11 +126,19 @@ export class EcoFlowConnection {
         this.log('info', 'Type 1 encryption established. Sending status request...');
         setTimeout(() => this.requestStatus(), 500);
         this.startStatusPolling();
+      } else if (this.encryptionType === 7) {
+        // Type 7 ECDH — not yet implemented
+        this.handlers.onStateChange('connected');
+        this.log('info', '--- Type 7 (ECDH) encryption detected ---');
+        this.log('info', 'This device requires a full ECDH handshake to communicate.');
+        this.log('info', 'The handshake needs a login_key.bin file and EcoFlow user credentials.');
+        this.log('info', 'Without authentication, the device will disconnect after ~10 seconds.');
+        this.log('info', 'Listening for any data the device might send...');
+        this.log('info', 'You can use the Command panel to try raw bytes for exploration.');
+        // Don't send unencrypted commands — they won't work and may trigger disconnect
       } else {
-        // Unknown encryption or Type 7 — try direct communication
-        this.log('info', 'Encryption type unknown or Type 7 (ECDH). Trying direct communication...');
-        this.log('info', 'Type 7 requires login_key.bin and user credentials (not yet supported).');
-        this.log('info', 'Attempting unencrypted heartbeat requests...');
+        // Unknown encryption type — try direct communication
+        this.log('info', 'Encryption type unknown. Attempting unencrypted communication...');
         this.handlers.onStateChange('connected');
         setTimeout(() => this.requestStatus(), 500);
         this.startStatusPolling();
@@ -144,30 +154,47 @@ export class EcoFlowConnection {
   private identifyDevice(): void {
     if (!this.device) return;
     const name = this.device.name ?? '';
-
-    // Try to extract serial from device name (EF-XXXXX format)
-    // or determine from name prefix
     let model = 'Unknown';
     this.encryptionType = 0;
 
-    for (const [prefix, deviceModel] of Object.entries(DEVICE_PREFIXES)) {
-      if (name.includes(prefix)) {
-        model = deviceModel;
-        // Extract serial if name starts with EF-
-        if (name.startsWith('EF-')) {
-          this.serialNumber = name.substring(3);
-        } else {
-          this.serialNumber = name;
-        }
+    // Extract the portion after "EF-" prefix
+    const suffix = name.startsWith('EF-') ? name.substring(3) : name;
 
-        // Determine encryption type
-        if (TYPE1_PREFIXES.some(p => (this.serialNumber ?? '').startsWith(p))) {
-          this.encryptionType = 1;
-        } else {
-          this.encryptionType = 7;
-        }
+    // Strategy 1: Match BLE short name (e.g., "R3P50256" -> "R3P" = River 3 Plus)
+    // Try longest prefix match first
+    const sortedKeys = Object.keys(BLE_NAME_MAP).sort((a, b) => b.length - a.length);
+    for (const shortPrefix of sortedKeys) {
+      if (suffix.startsWith(shortPrefix)) {
+        const match = BLE_NAME_MAP[shortPrefix];
+        model = match.model;
+        this.encryptionType = match.encType;
+        // The remainder after the model prefix is part of the serial/identifier
+        this.serialNumber = suffix;
         break;
       }
+    }
+
+    // Strategy 2: Match full serial prefix (if device name IS the serial)
+    if (model === 'Unknown') {
+      for (const [prefix, deviceModel] of Object.entries(DEVICE_PREFIXES)) {
+        if (suffix.startsWith(prefix) || name.startsWith(prefix)) {
+          model = deviceModel;
+          this.serialNumber = suffix || name;
+          if (TYPE1_PREFIXES.some(p => (this.serialNumber ?? '').startsWith(p))) {
+            this.encryptionType = 1;
+          } else {
+            this.encryptionType = 7;
+          }
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: Unknown device — still store what we know
+    if (model === 'Unknown' && suffix) {
+      this.serialNumber = suffix;
+      this.log('info', `Unknown device model for name "${name}". ` +
+        'Please report the BLE name so we can add support.');
     }
 
     this.log('info', `Device: ${name}, Model: ${model}, Serial: ${this.serialNumber ?? 'unknown'}, Encryption: Type ${this.encryptionType}`);
@@ -292,7 +319,21 @@ export class EcoFlowConnection {
   private async attemptReconnect(): Promise<void> {
     if (!this.autoReconnect || !this.device) return;
 
-    this.log('info', 'Attempting auto-reconnect...');
+    // Don't endlessly reconnect if we can't authenticate
+    this.reconnectCount++;
+    if (this.reconnectCount > 3) {
+      this.log('error', 'Too many reconnect attempts. The device likely requires authentication.');
+      if (this.encryptionType === 7) {
+        this.log('error', 'This device uses Type 7 (ECDH) encryption which is not yet fully supported.');
+        this.log('error', 'The device disconnects because it expects an authentication handshake within ~10 seconds.');
+      }
+      this.log('info', 'Click Connect to try again manually.');
+      this.autoReconnect = false;
+      this.handlers.onStateChange('disconnected');
+      return;
+    }
+
+    this.log('info', `Attempting auto-reconnect (${this.reconnectCount}/3)...`);
     this.handlers.onStateChange('connecting');
 
     for (let attempt = 1; attempt <= 3; attempt++) {

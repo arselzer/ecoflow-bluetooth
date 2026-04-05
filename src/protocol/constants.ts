@@ -47,6 +47,31 @@ export const DEVICE_PREFIXES: Record<string, string> = {
   'Y711': 'Delta Pro Ultra',
 };
 
+// BLE advertisement name short-form mapping
+// Devices advertise as "EF-XXXYYYYY" where XXX is a short model code
+// This maps from BLE name prefix (after "EF-") to model and encryption type
+export const BLE_NAME_MAP: Record<string, { model: string; encType: number }> = {
+  // River 2 series (Type 1)
+  'R2': { model: 'River 2', encType: 1 },
+  'R2M': { model: 'River 2 Max', encType: 1 },
+  'R2P': { model: 'River 2 Pro', encType: 1 },
+  // River 3 series (Type 7)
+  'R3': { model: 'River 3', encType: 7 },
+  'R3P': { model: 'River 3 Plus', encType: 7 },
+  'R3M': { model: 'River 3 Max', encType: 7 },
+  // Delta series (Type 1)
+  'D2': { model: 'Delta 2', encType: 1 },
+  'D2M': { model: 'Delta 2 Max', encType: 1 },
+  // Delta 3 series (Type 7)
+  'D3': { model: 'Delta 3', encType: 7 },
+  'D3P': { model: 'Delta 3 Plus', encType: 7 },
+  'DP3': { model: 'Delta Pro 3', encType: 7 },
+  // Smart Home Panel (Type 7)
+  'HD3': { model: 'Smart Home Panel 2', encType: 7 },
+  // Delta Pro Ultra (Type 7)
+  'Y7': { model: 'Delta Pro Ultra', encType: 7 },
+};
+
 // BLE advertisement name prefixes
 export const BLE_NAME_PREFIXES = [
   'EF',       // Common prefix for EcoFlow devices (EF-R2..., EF-HD3...)
