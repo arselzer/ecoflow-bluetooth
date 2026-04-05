@@ -1,10 +1,11 @@
 import {
-  UUID_WRITE, UUID_NOTIFY, MANUFACTURER_ID,
-  BLE_NAME_PREFIXES, DEVICE_PREFIXES, FRAME_TYPE_COMMAND,
+  UUID_WRITE, UUID_NOTIFY, UUID_NUS_WRITE, UUID_NUS_NOTIFY,
+  MANUFACTURER_ID, BLE_NAME_PREFIXES, DEVICE_PREFIXES,
+  TYPE1_PREFIXES, FRAME_TYPE_COMMAND, SRC_APP, DST_DEVICE,
 } from './constants';
-import { encryptAesCbc, decryptAesCbc, type SessionKeys } from './crypto';
+import { deriveType1Keys, encryptAesCbc, decryptAesCbc, type SessionKeys } from './crypto';
 import { buildPacket, buildEncPacket, parsePacket, parseEncPacket, detectPacketType } from './packet';
-import { parseTelemetryDetailed } from './telemetry';
+import { parseTelemetryDetailed, identifyHeartbeat } from './telemetry';
 import { toHex, fromHex, concatBytes } from './utils';
 import type { ConnectionState, TelemetryData, LogEntry, DeviceInfo } from './types';
 
@@ -23,6 +24,8 @@ export class EcoFlowConnection {
   private notifyChar: BluetoothRemoteGATTCharacteristic | null = null;
 
   private sessionKeys: SessionKeys | null = null;
+  private serialNumber: string | null = null;
+  private encryptionType: number = 0; // 0=unknown, 1=MD5, 7=ECDH
   private packetBuffer: Uint8Array = new Uint8Array(0);
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
   private autoReconnect = true;
@@ -67,16 +70,13 @@ export class EcoFlowConnection {
       this.device = await navigator.bluetooth.requestDevice({
         filters,
         optionalServices: [
-          // EcoFlow doesn't use a custom service UUID; characteristics are under
-          // the standard GATT service. We request generic access.
           '00000001-0000-1000-8000-00805f9b34fb',
+          '6e400001-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART service
         ],
       });
 
       this.log('info', `Found device: ${this.device.name}`);
-
-      // Try to parse manufacturer data from the device
-      this.parseDeviceAdvertisement();
+      this.identifyDevice();
 
       this.device.addEventListener('gattserverdisconnected', () => {
         this.log('info', 'Device disconnected');
@@ -104,50 +104,7 @@ export class EcoFlowConnection {
         }
       }
 
-      this.log('info', 'Getting service and characteristics...');
-
-      // Try to find the service containing EcoFlow characteristics
-      // EcoFlow uses 16-bit UUID 0x0001, 0x0002, 0x0003 expanded to 128-bit
-      let service: BluetoothRemoteGATTService;
-      try {
-        service = await this.server!.getPrimaryService('00000001-0000-1000-8000-00805f9b34fb');
-      } catch {
-        // Fallback: try to discover all services
-        this.log('info', 'Primary service not found, discovering services...');
-        const services = await this.server!.getPrimaryServices();
-        this.log('info', `Found ${services.length} services: ${services.map((s: BluetoothRemoteGATTService) => s.uuid).join(', ')}`);
-        if (services.length === 0) throw new Error('No GATT services found');
-        service = services[0];
-      }
-
-      try {
-        this.writeChar = await service.getCharacteristic(UUID_WRITE);
-        this.log('info', 'Write characteristic found');
-      } catch {
-        this.log('info', 'Standard write characteristic not found, searching all characteristics...');
-        const chars = await service.getCharacteristics();
-        this.log('info', `Found ${chars.length} characteristics: ${chars.map((c: BluetoothRemoteGATTCharacteristic) => c.uuid).join(', ')}`);
-        // Try to find writable and notifiable characteristics
-        for (const c of chars) {
-          if (c.properties.write || c.properties.writeWithoutResponse) {
-            this.writeChar = c;
-            this.log('info', `Using ${c.uuid} for writing`);
-          }
-          if (c.properties.notify) {
-            this.notifyChar = c;
-            this.log('info', `Using ${c.uuid} for notifications`);
-          }
-        }
-      }
-
-      if (!this.notifyChar) {
-        try {
-          this.notifyChar = await service.getCharacteristic(UUID_NOTIFY);
-          this.log('info', 'Notify characteristic found');
-        } catch {
-          this.log('error', 'Notify characteristic not found');
-        }
-      }
+      await this.discoverCharacteristics();
 
       if (this.notifyChar) {
         this.log('info', 'Subscribing to notifications...');
@@ -156,11 +113,26 @@ export class EcoFlowConnection {
       }
 
       this.handlers.onStateChange('negotiating');
-      this.log('info', 'Connected. Attempting communication...');
 
-      // For unencrypted devices (older firmware / River 2), try direct commands
-      // For encrypted devices (V2 protocol), need ECDH handshake
-      await this.tryDirectCommunication();
+      // Try Type 1 encryption for River 2 / Delta 2
+      if (this.serialNumber && this.encryptionType === 1) {
+        this.log('info', `Deriving Type 1 keys from serial: ${this.serialNumber}`);
+        this.sessionKeys = await deriveType1Keys(this.serialNumber);
+        this.log('info', `AES key: ${toHex(this.sessionKeys.aesKey)}`);
+        this.log('info', `IV: ${toHex(this.sessionKeys.iv)}`);
+        this.handlers.onStateChange('connected');
+        this.log('info', 'Type 1 encryption established. Sending status request...');
+        setTimeout(() => this.requestStatus(), 500);
+        this.startStatusPolling();
+      } else {
+        // Unknown encryption or Type 7 — try direct communication
+        this.log('info', 'Encryption type unknown or Type 7 (ECDH). Trying direct communication...');
+        this.log('info', 'Type 7 requires login_key.bin and user credentials (not yet supported).');
+        this.log('info', 'Attempting unencrypted heartbeat requests...');
+        this.handlers.onStateChange('connected');
+        setTimeout(() => this.requestStatus(), 500);
+        this.startStatusPolling();
+      }
 
     } catch (error) {
       this.log('error', `Connection failed: ${error}`);
@@ -169,21 +141,126 @@ export class EcoFlowConnection {
     }
   }
 
-  private parseDeviceAdvertisement(): void {
+  private identifyDevice(): void {
     if (!this.device) return;
-
     const name = this.device.name ?? '';
 
-    // Determine model from device name or known patterns
+    // Try to extract serial from device name (EF-XXXXX format)
+    // or determine from name prefix
     let model = 'Unknown';
+    this.encryptionType = 0;
+
     for (const [prefix, deviceModel] of Object.entries(DEVICE_PREFIXES)) {
       if (name.includes(prefix)) {
         model = deviceModel;
+        // Extract serial if name starts with EF-
+        if (name.startsWith('EF-')) {
+          this.serialNumber = name.substring(3);
+        } else {
+          this.serialNumber = name;
+        }
+
+        // Determine encryption type
+        if (TYPE1_PREFIXES.some(p => (this.serialNumber ?? '').startsWith(p))) {
+          this.encryptionType = 1;
+        } else {
+          this.encryptionType = 7;
+        }
         break;
       }
     }
 
-    this.log('info', `Device name: ${name}, Model: ${model}`);
+    this.log('info', `Device: ${name}, Model: ${model}, Serial: ${this.serialNumber ?? 'unknown'}, Encryption: Type ${this.encryptionType}`);
+
+    this.handlers.onDeviceInfo({
+      serialNumber: this.serialNumber ?? name,
+      batteryLevel: -1,
+      deviceName: name,
+      model,
+    });
+  }
+
+  private async discoverCharacteristics(): Promise<void> {
+    if (!this.server) return;
+
+    // Try RFCOMM-style service first (River 2, Delta 2)
+    try {
+      const service = await this.server.getPrimaryService('00000001-0000-1000-8000-00805f9b34fb');
+      this.log('info', 'Found RFCOMM-style service');
+
+      try {
+        this.writeChar = await service.getCharacteristic(UUID_WRITE);
+        this.log('info', `Write char: ${UUID_WRITE}`);
+      } catch {
+        this.log('info', 'Write characteristic 0x0002 not found');
+      }
+
+      try {
+        this.notifyChar = await service.getCharacteristic(UUID_NOTIFY);
+        this.log('info', `Notify char: ${UUID_NOTIFY}`);
+      } catch {
+        this.log('info', 'Notify characteristic 0x0003 not found');
+      }
+
+      if (this.writeChar && this.notifyChar) return;
+    } catch {
+      this.log('info', 'RFCOMM service not found, trying Nordic UART...');
+    }
+
+    // Try Nordic UART Service
+    try {
+      const service = await this.server.getPrimaryService('6e400001-b5a3-f393-e0a9-e50e24dcca9e');
+      this.log('info', 'Found Nordic UART service');
+
+      if (!this.writeChar) {
+        try {
+          this.writeChar = await service.getCharacteristic(UUID_NUS_WRITE);
+          this.log('info', `Write char: ${UUID_NUS_WRITE}`);
+        } catch {
+          this.log('info', 'NUS write characteristic not found');
+        }
+      }
+
+      if (!this.notifyChar) {
+        try {
+          this.notifyChar = await service.getCharacteristic(UUID_NUS_NOTIFY);
+          this.log('info', `Notify char: ${UUID_NUS_NOTIFY}`);
+        } catch {
+          this.log('info', 'NUS notify characteristic not found');
+        }
+      }
+
+      if (this.writeChar && this.notifyChar) return;
+    } catch {
+      this.log('info', 'Nordic UART service not found');
+    }
+
+    // Last resort: discover all services/characteristics
+    this.log('info', 'Discovering all services...');
+    const services = await this.server.getPrimaryServices();
+    this.log('info', `Found ${services.length} services: ${services.map((s: BluetoothRemoteGATTService) => s.uuid).join(', ')}`);
+
+    for (const service of services) {
+      const chars = await service.getCharacteristics();
+      for (const c of chars) {
+        this.log('info', `  ${service.uuid} -> ${c.uuid} [${[
+          c.properties.read && 'R',
+          c.properties.write && 'W',
+          c.properties.writeWithoutResponse && 'WnR',
+          c.properties.notify && 'N',
+        ].filter(Boolean).join(',')}]`);
+
+        if (!this.writeChar && (c.properties.write || c.properties.writeWithoutResponse)) {
+          this.writeChar = c;
+        }
+        if (!this.notifyChar && c.properties.notify) {
+          this.notifyChar = c;
+        }
+      }
+    }
+
+    if (!this.writeChar) this.log('error', 'No writable characteristic found');
+    if (!this.notifyChar) this.log('error', 'No notify characteristic found');
   }
 
   async disconnect(): Promise<void> {
@@ -223,23 +300,16 @@ export class EcoFlowConnection {
         this.server = await this.device.gatt!.connect();
         this.log('info', `Reconnected on attempt ${attempt}`);
 
-        const services = await this.server.getPrimaryServices();
-        if (services.length > 0) {
-          const service = services[0];
-          const chars = await service.getCharacteristics();
-          for (const c of chars) {
-            if (c.properties.write || c.properties.writeWithoutResponse) {
-              this.writeChar = c;
-            }
-            if (c.properties.notify) {
-              this.notifyChar = c;
-            }
-          }
-        }
+        await this.discoverCharacteristics();
 
         if (this.notifyChar) {
           await this.notifyChar.startNotifications();
           this.notifyChar.addEventListener('characteristicvaluechanged', this.onNotification.bind(this));
+        }
+
+        // Re-derive keys if we had them
+        if (this.serialNumber && this.encryptionType === 1) {
+          this.sessionKeys = await deriveType1Keys(this.serialNumber);
         }
 
         this.handlers.onStateChange('connected');
@@ -263,36 +333,15 @@ export class EcoFlowConnection {
     this.stopStatusPolling();
   }
 
-  private async tryDirectCommunication(): Promise<void> {
-    // Try sending an unencrypted heartbeat request
-    // If the device responds, we have unencrypted communication
-    // If not, the device requires V2 encryption
-    this.log('info', 'Trying direct (unencrypted) communication...');
-
-    try {
-      // Send PD heartbeat request (cmdSet=0x02, cmdId=0x01)
-      await this.sendRawCommand(0x20, 0x01, 0x02, 0x01, new Uint8Array(0));
-      this.handlers.onStateChange('connected');
-      this.startStatusPolling();
-    } catch (e) {
-      this.log('info', `Direct communication attempt: ${e}`);
-      this.log('info', 'Device may require V2 encrypted protocol.');
-      this.log('info', 'Try using the Command panel to send raw packets for exploration.');
-      this.handlers.onStateChange('connected');
-      this.startStatusPolling();
-    }
-  }
-
   private async onNotification(event: Event): Promise<void> {
     const target = event.target as BluetoothRemoteGATTCharacteristic;
     const data = new Uint8Array(target.value!.buffer);
 
     this.handlers.onRawPacket('rx', data);
 
-    // Buffer incomplete packets (BLE MTU may split large packets)
+    // Buffer incomplete packets (BLE MTU splits large packets)
     this.packetBuffer = concatBytes(this.packetBuffer, data);
 
-    // Try to parse buffered data
     await this.processBuffer();
   }
 
@@ -300,26 +349,12 @@ export class EcoFlowConnection {
     while (this.packetBuffer.length > 0) {
       const type = detectPacketType(this.packetBuffer);
 
-      if (type === 'inner') {
-        // 0xAA packet
-        if (this.packetBuffer.length < 5) return; // Need more data
-
-        const length = this.packetBuffer[2] | (this.packetBuffer[3] << 8);
-        const totalLen = 5 + length; // header(4) + crc8(1) + body+crc16(length)
-
-        if (this.packetBuffer.length < totalLen) return; // Incomplete
-
-        const packetData = this.packetBuffer.slice(0, totalLen);
-        this.packetBuffer = this.packetBuffer.slice(totalLen);
-
-        await this.handleInnerPacket(packetData);
-
-      } else if (type === 'encrypted') {
+      if (type === 'encrypted') {
         // 0x5A5A packet
         if (this.packetBuffer.length < 6) return;
 
         const length = this.packetBuffer[4] | (this.packetBuffer[5] << 8);
-        const totalLen = 6 + length + 2; // header(6) + payload(length) + crc16(2)
+        const totalLen = 6 + length; // header(6) + payload_with_crc(length)
 
         if (this.packetBuffer.length < totalLen) return;
 
@@ -328,44 +363,61 @@ export class EcoFlowConnection {
 
         await this.handleEncryptedPacket(packetData);
 
+      } else if (type === 'inner') {
+        // 0xAA packet (unencrypted)
+        if (this.packetBuffer.length < 5) return;
+
+        const payloadLen = this.packetBuffer[2] | (this.packetBuffer[3] << 8);
+        const totalLen = 5 + payloadLen; // header(4) + crc8(1) + body+crc16(payloadLen)
+
+        if (this.packetBuffer.length < totalLen) return;
+
+        const packetData = this.packetBuffer.slice(0, totalLen);
+        this.packetBuffer = this.packetBuffer.slice(totalLen);
+
+        this.handleInnerPacket(packetData);
+
       } else {
-        // Unknown data - log and skip one byte
-        this.log('rx', `Unknown byte: 0x${this.packetBuffer[0].toString(16)}`, toHex(this.packetBuffer.slice(0, Math.min(20, this.packetBuffer.length))));
+        // Unknown data — skip one byte
+        this.log('rx', `Unknown byte: 0x${this.packetBuffer[0].toString(16)}`,
+          toHex(this.packetBuffer.slice(0, Math.min(20, this.packetBuffer.length))));
         this.packetBuffer = this.packetBuffer.slice(1);
       }
     }
   }
 
-  private async handleInnerPacket(data: Uint8Array): Promise<void> {
+  private handleInnerPacket(data: Uint8Array): void {
     const packet = parsePacket(data);
     if (!packet) {
       this.log('rx', 'Failed to parse inner packet', toHex(data));
       return;
     }
 
+    const heartbeatType = identifyHeartbeat(packet.src, packet.cmdId);
     this.log('rx',
-      `[0xAA] seq=${packet.seq} ${packet.src.toString(16)}->${packet.dst.toString(16)} cmd=${packet.cmdSet.toString(16).padStart(2, '0')}:${packet.cmdId.toString(16).padStart(2, '0')} (${packet.payload.length}B)`,
-      toHex(data),
+      `[0xAA] v${packet.version} seq=${packet.seq} ${packet.src.toString(16)}->${packet.dst.toString(16)} ` +
+      `cmd=${packet.cmdSet.toString(16).padStart(2, '0')}:${packet.cmdId.toString(16).padStart(2, '0')} ` +
+      `(${packet.payload.length}B) [${heartbeatType}]`,
+      toHex(packet.payload).substring(0, 80),
     );
 
-    // Try to parse as telemetry
+    // Parse telemetry
     if (packet.payload.length > 0) {
       try {
-        const { data: telemetry, tlvEntries } = parseTelemetryDetailed(
-          packet.payload, packet.cmdSet, packet.cmdId,
+        const { data: telemetry, fields } = parseTelemetryDetailed(
+          packet.payload, packet.src, packet.cmdSet, packet.cmdId,
         );
 
-        for (const entry of tlvEntries) {
-          const nameStr = entry.name ? ` (${entry.name})` : ' [UNKNOWN]';
-          const valStr = entry.decoded !== null ? ` = ${entry.decoded}${entry.unit ?? ''}` : '';
-          this.log('info', `  Field ${entry.fieldNumber}${nameStr}${valStr}`, entry.rawHex);
+        for (const field of fields) {
+          const valStr = field.unit ? `${field.value} ${field.unit}` : `${field.value}`;
+          this.log('info', `  ${field.name} = ${valStr}`, field.rawHex);
         }
 
         if (Object.keys(telemetry).length > 0) {
           this.handlers.onTelemetry(telemetry);
         }
       } catch (e) {
-        this.log('info', `Payload parse failed: ${e}`, toHex(packet.payload));
+        this.log('info', `Payload parse error: ${e}`);
       }
     }
   }
@@ -379,7 +431,7 @@ export class EcoFlowConnection {
 
     this.log('rx',
       `[0x5A5A] frame=${enc.frameType} type=${enc.payloadType} encrypted=${enc.encryptedPayload.length}B`,
-      toHex(data),
+      toHex(data).substring(0, 80),
     );
 
     if (this.sessionKeys) {
@@ -387,21 +439,33 @@ export class EcoFlowConnection {
         const decrypted = await decryptAesCbc(
           enc.encryptedPayload, this.sessionKeys.aesKey, this.sessionKeys.iv,
         );
-        this.log('rx', `Decrypted (${decrypted.length}B)`, toHex(decrypted));
+        this.log('rx', `Decrypted (${decrypted.length}B)`, toHex(decrypted).substring(0, 80));
 
-        // Try to parse the decrypted data as an inner packet
-        await this.handleInnerPacket(decrypted);
+        // Parse the decrypted data as an inner packet
+        this.handleInnerPacket(decrypted);
       } catch (e) {
-        this.log('rx', `Decryption failed: ${e}`);
+        this.log('rx', `Decryption failed: ${e}`, toHex(enc.encryptedPayload).substring(0, 60));
       }
     } else {
-      this.log('info', 'Encrypted packet received but no session keys. V2 encryption handshake required.');
+      this.log('info', 'Encrypted packet received but no session keys.');
+      this.log('info', 'If this is a River 2/Delta 2, the serial number may not have been detected correctly.');
+      this.log('info', 'For River 3/Delta 3/SHP2/DPU, Type 7 ECDH encryption is required (not yet supported).');
     }
   }
 
   async requestStatus(): Promise<void> {
-    // Send heartbeat requests for all subsystems
-    await this.sendRawCommand(0x20, 0x01, 0x02, 0x01, new Uint8Array(0)); // PD heartbeat
+    // Request all heartbeat types
+    // The device responds with heartbeat data from each subsystem
+    this.log('tx', 'Requesting status heartbeats...');
+
+    // For encrypted devices, wrap in EncPacket
+    if (this.sessionKeys) {
+      // PD heartbeat request
+      await this.sendEncryptedCommand(SRC_APP, DST_DEVICE, 0x02, 0x01, new Uint8Array(0));
+    } else {
+      // Try unencrypted
+      await this.sendRawCommand(SRC_APP, DST_DEVICE, 0x02, 0x01, new Uint8Array(0));
+    }
   }
 
   // Send an unencrypted command
@@ -418,7 +482,10 @@ export class EcoFlowConnection {
     }
 
     const packet = buildPacket(src, dst, cmdSet, cmdId, payload);
-    this.log('tx', `cmd=${cmdSet.toString(16).padStart(2, '0')}:${cmdId.toString(16).padStart(2, '0')} (${payload.length}B payload)`, toHex(packet));
+    this.log('tx',
+      `cmd=${cmdSet.toString(16).padStart(2, '0')}:${cmdId.toString(16).padStart(2, '0')} (${payload.length}B)`,
+      toHex(packet).substring(0, 80),
+    );
     this.handlers.onRawPacket('tx', packet);
 
     try {
@@ -449,13 +516,20 @@ export class EcoFlowConnection {
     const encrypted = await encryptAesCbc(innerPacket, this.sessionKeys.aesKey, this.sessionKeys.iv);
     const encPacket = buildEncPacket(FRAME_TYPE_COMMAND, encrypted);
 
-    this.log('tx', `[ENC] cmd=${cmdSet.toString(16).padStart(2, '0')}:${cmdId.toString(16).padStart(2, '0')}`, toHex(encPacket));
+    this.log('tx',
+      `[ENC] cmd=${cmdSet.toString(16).padStart(2, '0')}:${cmdId.toString(16).padStart(2, '0')} (${payload.length}B)`,
+      toHex(encPacket).substring(0, 80),
+    );
     this.handlers.onRawPacket('tx', encPacket);
 
     try {
       await this.writeChar.writeValueWithoutResponse(encPacket);
     } catch {
-      await this.writeChar.writeValue(encPacket);
+      try {
+        await this.writeChar.writeValue(encPacket);
+      } catch (e) {
+        this.log('error', `Write failed: ${e}`);
+      }
     }
   }
 
@@ -473,7 +547,11 @@ export class EcoFlowConnection {
     try {
       await this.writeChar.writeValueWithoutResponse(data);
     } catch {
-      await this.writeChar.writeValue(data);
+      try {
+        await this.writeChar.writeValue(data);
+      } catch (e) {
+        this.log('error', `Write failed: ${e}`);
+      }
     }
   }
 }

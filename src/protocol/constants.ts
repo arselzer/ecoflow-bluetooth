@@ -1,10 +1,13 @@
 // EcoFlow BLE Protocol Constants
-// Based on reverse engineering from rabits/ef-ble-reverse and community projects
+// Based on reverse engineering from rabits/ha-ef-ble and community projects
 
-// BLE GATT UUIDs
-// EcoFlow uses standard 16-bit UUIDs expanded to 128-bit
+// BLE GATT UUIDs — two transports supported
+// RFCOMM-style (primary, used by River 2, Delta 2)
 export const UUID_WRITE = '00000002-0000-1000-8000-00805f9b34fb';
 export const UUID_NOTIFY = '00000003-0000-1000-8000-00805f9b34fb';
+// Nordic UART Service (alternative, some newer devices)
+export const UUID_NUS_WRITE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+export const UUID_NUS_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 // Manufacturer ID in BLE advertisements
 export const MANUFACTURER_ID = 0xb5b5;
@@ -17,17 +20,17 @@ export const ENC_PACKET_PREFIX = 0x5a5a; // Encrypted outer packet header
 export const FRAME_TYPE_COMMAND = 0x00;
 export const FRAME_TYPE_PROTOCOL = 0x01;
 
-// Payload types
-export const PAYLOAD_TYPE_VX = 0x00;
-export const PAYLOAD_TYPE_ODM = 0x04;
-
 // Device serial number prefixes (for identification)
+// Source: rabits/ha-ef-ble device_mappings.py
 export const DEVICE_PREFIXES: Record<string, string> = {
-  // River 2 series
-  'R331': 'River 2',
-  'R332': 'River 2 Max',
-  'R333': 'River 2 Pro',
-  // River 3 series
+  // River 2 series (protocol v2, Type 1 encryption)
+  'R601': 'River 2',
+  'R603': 'River 2',
+  'R611': 'River 2 Max',
+  'R613': 'River 2 Max',
+  'R621': 'River 2 Pro',
+  'R623': 'River 2 Pro',
+  // River 3 series (protocol v2, Type 7 encryption)
   'R651': 'River 3',
   'R653': 'River 3 Plus',
   'R654': 'River 3 Max',
@@ -46,203 +49,257 @@ export const DEVICE_PREFIXES: Record<string, string> = {
 
 // BLE advertisement name prefixes
 export const BLE_NAME_PREFIXES = [
-  'EF-',      // Common prefix for EcoFlow devices
-  'HD3',      // Smart Home Panel 2
-  'Y7',       // Delta Pro Ultra
-  'R33',      // River 2 series
-  'R6',       // River 3 series
-  'P3',       // Delta 3 series
-  'MR5',      // Delta Pro 3
-  'DAEB',     // Delta 2
+  'EF',       // Common prefix for EcoFlow devices (EF-R2..., EF-HD3...)
 ];
 
-// Command sets
-export const CMD_SET_AUTH = 0x35;
-export const CMD_SET_SYSTEM = 0x01;
-export const CMD_SET_PD = 0x02;
-export const CMD_SET_BMS = 0x02;
-export const CMD_SET_INV = 0x04;
-export const CMD_SET_MPPT = 0x05;
-export const CMD_SET_TIME = 0x0c;
+// Encryption types per device
+export const ENCRYPTION_TYPE_1 = 1; // River 2, Delta 2: MD5(serial)
+export const ENCRYPTION_TYPE_7 = 7; // River 3, Delta 3, SHP2, DPU: ECDH + login_key.bin
 
-// Command IDs
-export const CMD_ID_AUTH_REQUEST = 0x86;
-export const CMD_ID_AUTH_RESPONSE = 0x89;
-export const CMD_ID_RTC_SYNC = 0x52;
-export const CMD_ID_HEARTBEAT = 0x01;
+// Devices using Type 1 (simple MD5) encryption
+export const TYPE1_PREFIXES = ['R601', 'R603', 'R611', 'R613', 'R621', 'R623', 'DAEB', 'DAEC'];
 
-// Known command sets & IDs for River 2 / portable power stations
-// These are common across Delta/River series
-export const KNOWN_COMMANDS: Record<string, { name: string; description: string; cmdSet: number; cmdId: number; payloads?: Record<string, string> }> = {
-  'pd_heartbeat': {
-    name: 'PD Heartbeat',
-    description: 'Request power delivery status (battery, input/output power)',
-    cmdSet: 0x02,
-    cmdId: 0x01,
-  },
-  'bms_heartbeat': {
-    name: 'BMS Heartbeat',
-    description: 'Battery management system status',
-    cmdSet: 0x02,
-    cmdId: 0x02,
-  },
-  'inv_heartbeat': {
-    name: 'INV Heartbeat',
-    description: 'Inverter status (AC output)',
-    cmdSet: 0x04,
-    cmdId: 0x01,
-  },
-  'mppt_heartbeat': {
-    name: 'MPPT Heartbeat',
-    description: 'Solar charge controller status',
-    cmdSet: 0x05,
-    cmdId: 0x01,
-  },
+// Module/source addresses for heartbeat sources
+export const SRC_PD = 0x02;    // Power Delivery module
+export const SRC_EMS = 0x03;   // Energy Management System
+export const SRC_INV = 0x04;   // Inverter module
+export const SRC_MPPT = 0x05;  // Solar MPPT controller
+
+// Default destination for commands sent TO the device
+export const DST_DEVICE = 0x01;
+// Default source for commands sent FROM the app
+export const SRC_APP = 0x20;
+
+// ============================================================
+// River 2 Commands (src, dst, cmdSet, cmdId, payload format)
+// Source: rabits/ha-ef-ble devices/river2.py + tolwi/hassio-ecoflow-cloud
+// ============================================================
+export interface CommandDef {
+  name: string;
+  description: string;
+  src: number;
+  dst: number;
+  cmdSet: number;
+  cmdId: number;
+  payloads?: Record<string, string>; // hex payloads
+}
+
+export const RIVER2_COMMANDS: Record<string, CommandDef> = {
+  // --- Output Control ---
   'ac_on': {
     name: 'AC Output On',
-    description: 'Enable AC inverter output',
-    cmdSet: 0x04,
-    cmdId: 0x31,
-    payloads: { 'default': '01' },
+    description: 'Enable AC inverter output (byte 0=enabled, byte 1=xboost)',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x42,
+    payloads: { 'default': '0100' }, // enabled=1, xboost=0
   },
   'ac_off': {
     name: 'AC Output Off',
     description: 'Disable AC inverter output',
-    cmdSet: 0x04,
-    cmdId: 0x31,
-    payloads: { 'default': '00' },
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x42,
+    payloads: { 'default': '0000' }, // enabled=0, xboost=0
+  },
+  'ac_on_xboost': {
+    name: 'AC On + X-Boost',
+    description: 'Enable AC output with X-Boost',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x42,
+    payloads: { 'default': '0101' }, // enabled=1, xboost=1
   },
   'dc_on': {
-    name: 'DC Output On',
-    description: 'Enable DC (USB/12V) output',
-    cmdSet: 0x02,
-    cmdId: 0x31,
+    name: 'DC 12V On',
+    description: 'Enable DC 12V car port output',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x51,
     payloads: { 'default': '01' },
   },
   'dc_off': {
-    name: 'DC Output Off',
-    description: 'Disable DC (USB/12V) output',
-    cmdSet: 0x02,
-    cmdId: 0x31,
+    name: 'DC 12V Off',
+    description: 'Disable DC 12V car port output',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x51,
+    payloads: { 'default': '00' },
+  },
+  // --- Charge Settings ---
+  'max_charge_soc_100': {
+    name: 'Max Charge 100%',
+    description: 'Set maximum charge level to 100%',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x03, cmdId: 0x31,
+    payloads: { 'default': '64' }, // 100
+  },
+  'max_charge_soc_80': {
+    name: 'Max Charge 80%',
+    description: 'Set maximum charge level to 80%',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x03, cmdId: 0x31,
+    payloads: { 'default': '50' }, // 80
+  },
+  'min_discharge_soc_0': {
+    name: 'Min Discharge 0%',
+    description: 'Set minimum discharge level to 0%',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x03, cmdId: 0x33,
+    payloads: { 'default': '00' },
+  },
+  // --- Charge Speed ---
+  'ac_charge_200w': {
+    name: 'AC Charge 200W',
+    description: 'Set AC charging speed to 200W',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x45,
+    payloads: { 'default': 'c800ff' }, // 200 LE + 0xFF
+  },
+  'ac_charge_600w': {
+    name: 'AC Charge 600W',
+    description: 'Set AC charging speed to 600W',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x45,
+    payloads: { 'default': '5802ff' }, // 600 LE + 0xFF
+  },
+  // --- Quiet Mode ---
+  'quiet_on': {
+    name: 'Quiet Mode On',
+    description: 'Enable quiet/silent mode (reduce fan noise)',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x53,
+    payloads: { 'default': '01' },
+  },
+  'quiet_off': {
+    name: 'Quiet Mode Off',
+    description: 'Disable quiet mode',
+    src: SRC_APP, dst: DST_DEVICE,
+    cmdSet: 0x05, cmdId: 0x53,
     payloads: { 'default': '00' },
   },
 };
 
-// Telemetry parameter names for PD heartbeat (River 2 / Delta 2)
-export type ParamDef = {
+// ============================================================
+// River 2 Telemetry — Binary struct definitions
+// Heartbeat payloads are fixed-length binary structs, NOT protobuf
+// Source: rabits/ha-ef-ble devices/river2.py
+// ============================================================
+
+export interface StructField {
   name: string;
+  offset: number;
+  size: 1 | 2 | 4;  // bytes
+  signed?: boolean;
   unit?: string;
   divisor?: number;
-  signed?: boolean;
-};
+}
 
-// River 2 series PD (Power Delivery) heartbeat fields
-// Protobuf field numbers from reverse-engineered .proto files
-export const RIVER2_PD_PARAMS: Record<number, ParamDef> = {
-  1: { name: 'sys_watts', unit: 'W' },
-  2: { name: 'sys_ver' },
-  3: { name: 'remain_time', unit: 'min' },
-  4: { name: 'ac_auto_off_sec', unit: 's' },
-  5: { name: 'soc', unit: '%' },                    // Battery percentage
-  6: { name: 'watts_out_sum', unit: 'W' },           // Total output power
-  7: { name: 'watts_in_sum', unit: 'W' },            // Total input power
-  8: { name: 'usb1_watts', unit: 'W' },
-  9: { name: 'usb2_watts', unit: 'W' },
-  10: { name: 'usbc1_watts', unit: 'W' },
-  11: { name: 'usbc2_watts', unit: 'W' },
-  12: { name: 'car_watts', unit: 'W' },              // 12V car port
-  13: { name: 'ac_watts', unit: 'W' },               // AC output
-  14: { name: 'ac_in_watts', unit: 'W' },            // AC input (charging)
-  15: { name: 'mppt_watts', unit: 'W' },             // Solar input
-  16: { name: 'remain_cap', unit: 'Wh' },            // Remaining capacity
-  17: { name: 'full_cap', unit: 'Wh' },              // Full capacity
-  18: { name: 'temperature', unit: '\u00b0C', divisor: 10 },
-  19: { name: 'cycles' },                            // Battery cycles
-  20: { name: 'soh', unit: '%' },                    // State of health
-};
+// PD Heartbeat (src=0x02, cmdSet=0x20, cmdId=0x02) ~155 bytes
+export const PD_HEARTBEAT_FIELDS: StructField[] = [
+  { name: 'soc', offset: 14, size: 1, unit: '%' },
+  { name: 'watts_out_sum', offset: 15, size: 2, unit: 'W' },
+  { name: 'watts_in_sum', offset: 17, size: 2, unit: 'W' },
+  { name: 'remain_time', offset: 19, size: 4, unit: 'min', signed: true },
+  { name: 'dc_out_state', offset: 24, size: 1 },
+  { name: 'usb1_watts', offset: 25, size: 1, unit: 'W' },
+  { name: 'usb2_watts', offset: 26, size: 1, unit: 'W' },
+  { name: 'qc1_watts', offset: 27, size: 1, unit: 'W' },
+  { name: 'qc2_watts', offset: 28, size: 1, unit: 'W' },
+  { name: 'usbc1_watts', offset: 29, size: 1, unit: 'W' },
+  { name: 'usbc2_watts', offset: 30, size: 1, unit: 'W' },
+];
 
-// BMS heartbeat fields
-export const RIVER2_BMS_PARAMS: Record<number, ParamDef> = {
-  1: { name: 'bms_soc', unit: '%' },
-  2: { name: 'bms_voltage', unit: 'mV' },
-  3: { name: 'bms_current', unit: 'mA', signed: true },
-  4: { name: 'bms_temp', unit: '\u00b0C', divisor: 10 },
-  5: { name: 'bms_remain_cap', unit: 'mAh' },
-  6: { name: 'bms_full_cap', unit: 'mAh' },
-  7: { name: 'bms_cycles' },
-  8: { name: 'bms_soh', unit: '%' },
-  9: { name: 'cell_vol_max', unit: 'mV' },
-  10: { name: 'cell_vol_min', unit: 'mV' },
-};
+// EMS Heartbeat (src=0x03, cmdSet=0x20, cmdId=0x02) ~46 bytes
+export const EMS_HEARTBEAT_FIELDS: StructField[] = [
+  { name: 'chg_state', offset: 0, size: 1 },
+  { name: 'max_charge_soc', offset: 12, size: 1, unit: '%' },
+  { name: 'lcd_show_soc', offset: 14, size: 1, unit: '%' },
+  { name: 'chg_remain_time', offset: 17, size: 4, unit: 'min', signed: true },
+  { name: 'dsg_remain_time', offset: 21, size: 4, unit: 'min', signed: true },
+  { name: 'min_dsg_soc', offset: 43, size: 1, unit: '%' },
+];
 
-// Inverter heartbeat fields
-export const RIVER2_INV_PARAMS: Record<number, ParamDef> = {
-  1: { name: 'inv_ac_voltage', unit: 'V', divisor: 10 },
-  2: { name: 'inv_ac_current', unit: 'A', divisor: 1000 },
-  3: { name: 'inv_ac_watts', unit: 'W' },
-  4: { name: 'inv_frequency', unit: 'Hz', divisor: 10 },
-  5: { name: 'inv_temperature', unit: '\u00b0C', divisor: 10 },
-  6: { name: 'inv_dc_voltage', unit: 'V', divisor: 10 },
-  7: { name: 'inv_enabled' },                        // 0=off, 1=on
-  8: { name: 'inv_type' },                           // AC output type
-};
+// BMS Heartbeat (src=0x03, cmdSet=0x20, cmdId=0x32) ~69 bytes
+export const BMS_HEARTBEAT_FIELDS: StructField[] = [
+  { name: 'bms_soc', offset: 11, size: 1, unit: '%' },
+  { name: 'bms_voltage', offset: 12, size: 4, unit: 'mV' },
+  { name: 'bms_current', offset: 16, size: 4, unit: 'mA', signed: true },
+  { name: 'bms_temp', offset: 20, size: 1, unit: '\u00b0C' },
+  { name: 'bms_cycles', offset: 34, size: 4 },
+  { name: 'bms_soh', offset: 38, size: 1, unit: '%' },
+];
 
-// MPPT (Solar) heartbeat fields
-export const RIVER2_MPPT_PARAMS: Record<number, ParamDef> = {
-  1: { name: 'mppt_voltage', unit: 'V', divisor: 10 },
-  2: { name: 'mppt_current', unit: 'A', divisor: 100 },
-  3: { name: 'mppt_watts', unit: 'W' },
-  4: { name: 'mppt_temperature', unit: '\u00b0C', divisor: 10 },
-};
+// Inverter Heartbeat (src=0x04, cmdSet=any, cmdId=0x02)
+export const INV_HEARTBEAT_FIELDS: StructField[] = [
+  { name: 'inv_input_watts', offset: 9, size: 2, unit: 'W' },
+  { name: 'inv_output_watts', offset: 11, size: 2, unit: 'W' },
+  { name: 'inv_out_vol', offset: 14, size: 4, unit: 'mV' },
+  { name: 'cfg_ac_enabled', offset: 30, size: 1 },
+  { name: 'cfg_ac_xboost', offset: 31, size: 1 },
+];
+
+// MPPT Heartbeat (src=0x05, cmdSet=0x20, cmdId=0x02) ~80 bytes
+export const MPPT_HEARTBEAT_FIELDS: StructField[] = [
+  { name: 'mppt_in_vol', offset: 0, size: 2, unit: 'mV' },
+  { name: 'mppt_in_amp', offset: 2, size: 2, unit: 'mA' },
+  { name: 'mppt_in_watts', offset: 4, size: 2, unit: 'W' },
+  { name: 'mppt_out_vol', offset: 6, size: 2, unit: 'mV' },
+  { name: 'mppt_out_amp', offset: 8, size: 2, unit: 'mA' },
+  { name: 'mppt_out_watts', offset: 10, size: 2, unit: 'W' },
+  { name: 'mppt_temp', offset: 12, size: 2, unit: '\u00b0C', signed: true },
+  { name: 'dc_in_vol', offset: 36, size: 2, unit: 'mV' },
+  { name: 'dc_in_amp', offset: 38, size: 2, unit: 'mA' },
+  { name: 'dc_in_watts', offset: 40, size: 2, unit: 'W' },
+  { name: 'dc_charge_type', offset: 42, size: 1 },
+  { name: 'dc_in_type', offset: 43, size: 1 }, // 0=auto, 1=solar, 2=car
+];
 
 // Parameter display labels
 export const PARAM_LABELS: Record<string, string> = {
   soc: 'Battery %',
   watts_out_sum: 'Total Output',
   watts_in_sum: 'Total Input',
-  ac_watts: 'AC Output',
-  ac_in_watts: 'AC Input',
-  mppt_watts: 'Solar Input',
+  remain_time: 'Time Left',
+  dc_out_state: 'DC Port',
   usb1_watts: 'USB-A 1',
   usb2_watts: 'USB-A 2',
+  qc1_watts: 'QC 1',
+  qc2_watts: 'QC 2',
   usbc1_watts: 'USB-C 1',
   usbc2_watts: 'USB-C 2',
-  car_watts: '12V Car Port',
-  remain_cap: 'Remaining',
-  full_cap: 'Full Capacity',
-  temperature: 'Temperature',
-  remain_time: 'Time Left',
-  cycles: 'Battery Cycles',
-  soh: 'Health',
-  sys_watts: 'System Power',
+  chg_state: 'Charge State',
+  max_charge_soc: 'Max Charge',
+  lcd_show_soc: 'Display SoC',
+  chg_remain_time: 'Charge Time',
+  dsg_remain_time: 'Discharge Time',
+  min_dsg_soc: 'Min Discharge',
   bms_soc: 'BMS SoC',
   bms_voltage: 'BMS Voltage',
   bms_current: 'BMS Current',
   bms_temp: 'BMS Temp',
-  bms_remain_cap: 'BMS Remaining',
-  bms_full_cap: 'BMS Full Cap',
   bms_cycles: 'BMS Cycles',
   bms_soh: 'BMS Health',
-  cell_vol_max: 'Cell Max V',
-  cell_vol_min: 'Cell Min V',
-  inv_ac_voltage: 'AC Voltage',
-  inv_ac_current: 'AC Current',
-  inv_ac_watts: 'AC Power',
-  inv_frequency: 'AC Frequency',
-  inv_temperature: 'Inverter Temp',
-  inv_dc_voltage: 'DC Input V',
-  inv_enabled: 'Inverter On',
-  mppt_voltage: 'Solar Voltage',
-  mppt_current: 'Solar Current',
-  mppt_temperature: 'MPPT Temp',
+  inv_input_watts: 'AC Input',
+  inv_output_watts: 'AC Output',
+  inv_out_vol: 'AC Voltage',
+  cfg_ac_enabled: 'AC Enabled',
+  cfg_ac_xboost: 'X-Boost',
+  mppt_in_vol: 'Solar Voltage In',
+  mppt_in_amp: 'Solar Current In',
+  mppt_in_watts: 'Solar Power In',
+  mppt_out_vol: 'Solar Voltage Out',
+  mppt_out_amp: 'Solar Current Out',
+  mppt_out_watts: 'Solar Power Out',
+  mppt_temp: 'MPPT Temp',
+  dc_in_vol: 'DC Input Voltage',
+  dc_in_amp: 'DC Input Current',
+  dc_in_watts: 'DC Input Power',
+  dc_charge_type: 'DC Charge Type',
+  dc_in_type: 'DC Input Type',
 };
 
 // Parameter groups for display
 export const PARAM_GROUPS: Record<string, string[]> = {
-  'Battery': ['soc', 'remain_cap', 'full_cap', 'temperature', 'cycles', 'soh', 'remain_time', 'sys_watts'],
-  'Power I/O': ['watts_out_sum', 'watts_in_sum', 'ac_watts', 'ac_in_watts', 'mppt_watts'],
-  'USB/DC': ['usb1_watts', 'usb2_watts', 'usbc1_watts', 'usbc2_watts', 'car_watts'],
-  'BMS': ['bms_soc', 'bms_voltage', 'bms_current', 'bms_temp', 'bms_remain_cap', 'bms_full_cap', 'bms_cycles', 'bms_soh', 'cell_vol_max', 'cell_vol_min'],
-  'Inverter': ['inv_ac_voltage', 'inv_ac_current', 'inv_ac_watts', 'inv_frequency', 'inv_temperature', 'inv_dc_voltage', 'inv_enabled', 'inv_type'],
-  'Solar': ['mppt_voltage', 'mppt_current', 'mppt_temperature'],
+  'Battery': ['soc', 'lcd_show_soc', 'remain_time', 'chg_remain_time', 'dsg_remain_time', 'chg_state', 'max_charge_soc', 'min_dsg_soc'],
+  'Power I/O': ['watts_out_sum', 'watts_in_sum', 'inv_input_watts', 'inv_output_watts', 'inv_out_vol', 'cfg_ac_enabled', 'cfg_ac_xboost'],
+  'USB/DC': ['usb1_watts', 'usb2_watts', 'qc1_watts', 'qc2_watts', 'usbc1_watts', 'usbc2_watts', 'dc_out_state'],
+  'BMS': ['bms_soc', 'bms_voltage', 'bms_current', 'bms_temp', 'bms_cycles', 'bms_soh'],
+  'Solar/MPPT': ['mppt_in_vol', 'mppt_in_amp', 'mppt_in_watts', 'mppt_out_vol', 'mppt_out_amp', 'mppt_out_watts', 'mppt_temp'],
+  'DC Input': ['dc_in_vol', 'dc_in_amp', 'dc_in_watts', 'dc_charge_type', 'dc_in_type'],
 };

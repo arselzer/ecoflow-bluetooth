@@ -1,178 +1,150 @@
-import { RIVER2_PD_PARAMS, RIVER2_BMS_PARAMS, RIVER2_INV_PARAMS, RIVER2_MPPT_PARAMS, PARAM_LABELS, PARAM_GROUPS } from './constants';
-import type { ParamDef } from './constants';
+import {
+  PD_HEARTBEAT_FIELDS, EMS_HEARTBEAT_FIELDS, BMS_HEARTBEAT_FIELDS,
+  INV_HEARTBEAT_FIELDS, MPPT_HEARTBEAT_FIELDS,
+  PARAM_LABELS, PARAM_GROUPS,
+  SRC_PD, SRC_EMS, SRC_INV, SRC_MPPT,
+} from './constants';
+import type { StructField } from './constants';
 import type { TelemetryData } from './types';
 import { toHex } from './utils';
 
-export interface TlvEntry {
+export interface ParsedField {
+  name: string;
   offset: number;
-  fieldNumber: number;
-  wireType: number;
-  name: string | null;
+  size: number;
   rawHex: string;
-  decoded: string | number | null;
+  value: number;
   unit?: string;
 }
 
-// Simple protobuf varint decoder
-function decodeVarint(data: Uint8Array, offset: number): { value: number; bytesRead: number } {
-  let result = 0;
-  let shift = 0;
-  let bytesRead = 0;
-
-  while (offset + bytesRead < data.length) {
-    const byte = data[offset + bytesRead];
-    result |= (byte & 0x7f) << shift;
-    bytesRead++;
-    if ((byte & 0x80) === 0) break;
-    shift += 7;
-  }
-
-  return { value: result >>> 0, bytesRead };
-}
-
-// Parse protobuf-encoded telemetry data
-// EcoFlow uses protobuf for encoding heartbeat messages
-export function parseTelemetryDetailed(
-  data: Uint8Array,
-  cmdSet: number,
-  cmdId: number,
-): { data: TelemetryData; tlvEntries: TlvEntry[] } {
+// Parse a binary struct payload into named fields
+function parseStruct(data: Uint8Array, fields: StructField[]): { telemetry: TelemetryData; parsed: ParsedField[] } {
   const telemetry: TelemetryData = {};
-  const entries: TlvEntry[] = [];
+  const parsed: ParsedField[] = [];
 
-  // Select param map based on command set/id
-  let paramMap: Record<number, ParamDef>;
-  if (cmdSet === 0x02 && cmdId === 0x01) {
-    paramMap = RIVER2_PD_PARAMS;
-  } else if (cmdSet === 0x02 && cmdId === 0x02) {
-    paramMap = RIVER2_BMS_PARAMS;
-  } else if (cmdSet === 0x04 && cmdId === 0x01) {
-    paramMap = RIVER2_INV_PARAMS;
-  } else if (cmdSet === 0x05 && cmdId === 0x01) {
-    paramMap = RIVER2_MPPT_PARAMS;
-  } else {
-    paramMap = RIVER2_PD_PARAMS; // default
-  }
+  for (const field of fields) {
+    if (field.offset + field.size > data.length) continue;
 
-  let offset = 0;
-  while (offset < data.length) {
-    // Read protobuf tag (field_number << 3 | wire_type)
-    const { value: tag, bytesRead: tagBytes } = decodeVarint(data, offset);
-    if (tagBytes === 0) break;
+    const rawBytes = data.slice(field.offset, field.offset + field.size);
+    let value: number;
 
-    const fieldNumber = tag >>> 3;
-    const wireType = tag & 0x07;
-    const entryOffset = offset;
-
-    offset += tagBytes;
-
-    let rawBytes: Uint8Array;
-    let decoded: string | number | null = null;
-
-    switch (wireType) {
-      case 0: { // Varint
-        const { value, bytesRead } = decodeVarint(data, offset);
-        rawBytes = data.slice(entryOffset, offset + bytesRead);
-        decoded = value;
-        offset += bytesRead;
+    switch (field.size) {
+      case 1:
+        value = field.signed
+          ? (data[field.offset] > 127 ? data[field.offset] - 256 : data[field.offset])
+          : data[field.offset];
+        break;
+      case 2: {
+        const raw = data[field.offset] | (data[field.offset + 1] << 8);
+        value = field.signed
+          ? (raw > 0x7fff ? raw - 0x10000 : raw)
+          : raw;
         break;
       }
-      case 1: { // 64-bit fixed
-        rawBytes = data.slice(entryOffset, offset + 8);
-        if (offset + 8 <= data.length) {
-          // Read as double
-          const view = new DataView(data.buffer, data.byteOffset + offset, 8);
-          decoded = view.getFloat64(0, true);
-        }
-        offset += 8;
+      case 4: {
+        const raw = (data[field.offset] | (data[field.offset + 1] << 8) |
+          (data[field.offset + 2] << 16) | (data[field.offset + 3] << 24));
+        value = field.signed ? raw : raw >>> 0;
         break;
       }
-      case 2: { // Length-delimited
-        const { value: len, bytesRead } = decodeVarint(data, offset);
-        offset += bytesRead;
-        rawBytes = data.slice(entryOffset, offset + len);
-        if (offset + len <= data.length) {
-          const fieldData = data.slice(offset, offset + len);
-          // Try to decode as string
-          const ascii = new TextDecoder().decode(fieldData);
-          if (/^[\x20-\x7e]+$/.test(ascii)) {
-            decoded = ascii;
-          } else {
-            decoded = toHex(fieldData);
-          }
-        }
-        offset += len;
-        break;
-      }
-      case 5: { // 32-bit fixed
-        rawBytes = data.slice(entryOffset, offset + 4);
-        if (offset + 4 <= data.length) {
-          const view = new DataView(data.buffer, data.byteOffset + offset, 4);
-          // Try as float first, then as uint32
-          const floatVal = view.getFloat32(0, true);
-          const uint32Val = view.getUint32(0, true);
-          decoded = (Math.abs(floatVal) < 1e6 && Math.abs(floatVal) > 1e-6) ? Math.round(floatVal * 100) / 100 : uint32Val;
-        }
-        offset += 4;
-        break;
-      }
-      default: {
-        // Unknown wire type - stop parsing
-        rawBytes = data.slice(entryOffset);
-        offset = data.length;
-        break;
-      }
+      default:
+        continue;
     }
 
-    const param = paramMap[fieldNumber];
-    let name = param?.name ?? null;
-    let value = decoded;
-
-    if (param && typeof value === 'number') {
-      if (param.divisor) {
-        value = Math.round((value / param.divisor) * 10) / 10;
-      }
-      if (param.signed && value > 0x7fffffff) {
-        value = value - 0x100000000;
-      }
+    if (field.divisor) {
+      value = Math.round((value / field.divisor) * 10) / 10;
     }
 
-    if (name && value !== null) {
-      telemetry[name] = value;
-    }
-
-    entries.push({
-      offset: entryOffset,
-      fieldNumber,
-      wireType,
-      name,
-      rawHex: toHex(rawBytes!),
-      decoded: value,
-      unit: param?.unit,
+    telemetry[field.name] = value;
+    parsed.push({
+      name: field.name,
+      offset: field.offset,
+      size: field.size,
+      rawHex: toHex(rawBytes),
+      value,
+      unit: field.unit,
     });
   }
 
-  return { data: telemetry, tlvEntries: entries };
+  return { telemetry, parsed };
+}
+
+// Select the correct struct fields based on packet source/cmdSet/cmdId
+function selectFields(src: number, _cmdSet: number, cmdId: number): StructField[] | null {
+  // PD Heartbeat: src=0x02, cmdSet=0x20, cmdId=0x02
+  if (src === SRC_PD && cmdId === 0x02) return PD_HEARTBEAT_FIELDS;
+
+  // EMS Heartbeat: src=0x03, cmdSet=0x20, cmdId=0x02
+  if (src === SRC_EMS && cmdId === 0x02) return EMS_HEARTBEAT_FIELDS;
+
+  // BMS Heartbeat: src=0x03, cmdSet=0x20, cmdId=0x32
+  if (src === SRC_EMS && cmdId === 0x32) return BMS_HEARTBEAT_FIELDS;
+
+  // Inverter Heartbeat: src=0x04, cmdId=0x02
+  if (src === SRC_INV && cmdId === 0x02) return INV_HEARTBEAT_FIELDS;
+
+  // MPPT Heartbeat: src=0x05, cmdSet=0x20, cmdId=0x02
+  if (src === SRC_MPPT && cmdId === 0x02) return MPPT_HEARTBEAT_FIELDS;
+
+  return null;
+}
+
+// Parse telemetry from a decoded inner packet
+export function parseTelemetryDetailed(
+  payload: Uint8Array,
+  src: number,
+  cmdSet: number,
+  cmdId: number,
+): { data: TelemetryData; fields: ParsedField[] } {
+  const structFields = selectFields(src, cmdSet, cmdId);
+
+  if (!structFields) {
+    // Unknown message type — return raw hex dump
+    return {
+      data: {},
+      fields: [{
+        name: `raw_${src.toString(16)}_${cmdSet.toString(16)}_${cmdId.toString(16)}`,
+        offset: 0,
+        size: payload.length,
+        rawHex: toHex(payload),
+        value: payload.length,
+        unit: 'bytes',
+      }],
+    };
+  }
+
+  const { telemetry, parsed } = parseStruct(payload, structFields);
+  return { data: telemetry, fields: parsed };
 }
 
 // Convenience wrapper
-export function parseTelemetry(data: Uint8Array, cmdSet: number, cmdId: number): TelemetryData {
-  return parseTelemetryDetailed(data, cmdSet, cmdId).data;
+export function parseTelemetry(payload: Uint8Array, src: number, cmdSet: number, cmdId: number): TelemetryData {
+  return parseTelemetryDetailed(payload, src, cmdSet, cmdId).data;
 }
 
 // Parse manufacturer data from BLE advertisement
-// Format: [flags...] serial_number(16 bytes) battery_level(1 byte) ...
+// Format: [flags] serial_number(16 bytes) battery_level(1 byte) ...
 export function parseManufacturerData(data: DataView): { serialNumber: string; batteryLevel: number } | null {
   if (data.byteLength < 18) return null;
 
-  // Serial number is at bytes 1-17 (16 chars)
+  // Serial number is at bytes 1-17 (16 chars, ASCII)
   const serialBytes = new Uint8Array(data.buffer, data.byteOffset + 1, 16);
   const serialNumber = new TextDecoder().decode(serialBytes).replace(/\0/g, '');
 
-  // Battery level follows
+  // Battery level follows serial
   const batteryLevel = data.byteLength > 17 ? data.getUint8(17) : -1;
 
   return { serialNumber, batteryLevel };
+}
+
+// Identify heartbeat type for display
+export function identifyHeartbeat(src: number, cmdId: number): string {
+  if (src === SRC_PD && cmdId === 0x02) return 'PD Heartbeat';
+  if (src === SRC_EMS && cmdId === 0x02) return 'EMS Heartbeat';
+  if (src === SRC_EMS && cmdId === 0x32) return 'BMS Heartbeat';
+  if (src === SRC_INV && cmdId === 0x02) return 'Inverter Heartbeat';
+  if (src === SRC_MPPT && cmdId === 0x02) return 'MPPT Heartbeat';
+  return `Unknown (src=0x${src.toString(16)}, cmd=0x${cmdId.toString(16)})`;
 }
 
 // Re-export display helpers

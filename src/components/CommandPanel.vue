@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { KNOWN_COMMANDS, fromHex } from '../protocol';
+import { RIVER2_COMMANDS, fromHex } from '../protocol';
 
 defineProps<{
   connected: boolean;
@@ -20,11 +20,11 @@ const customCmdId = ref('01');
 const customPayload = ref('');
 const rawHex = ref('');
 
-function sendKnownCommand(key: string) {
-  const cmd = KNOWN_COMMANDS[key];
+function sendNamedCommand(key: string) {
+  const cmd = RIVER2_COMMANDS[key];
   if (!cmd) return;
   const payload = cmd.payloads?.default ? fromHex(cmd.payloads.default) : new Uint8Array(0);
-  emit('command', 0x20, 0x01, cmd.cmdSet, cmd.cmdId, payload);
+  emit('command', cmd.src, cmd.dst, cmd.cmdSet, cmd.cmdId, payload);
 }
 
 function sendCustomCommand() {
@@ -45,8 +45,6 @@ function sendRawHex() {
     emit('rawBytes', rawHex.value);
   }
 }
-
-
 </script>
 
 <template>
@@ -59,27 +57,44 @@ function sendRawHex() {
 
     <template v-else>
       <div class="warning">
-        Commands are based on reverse-engineered protocol and may not work on all devices.
-        AC/DC toggle commands have not been verified on all models. Use with caution.
+        Commands are based on reverse-engineered protocol (rabits/ha-ef-ble).
+        AC/DC toggles verified on River 2 series. Other devices may differ.
+        Use with caution — some commands could affect device operation.
       </div>
 
       <div class="section">
-        <h4>Status Requests</h4>
+        <h4>Output Control (River 2)</h4>
         <div class="button-grid">
-          <button class="cmd-btn" @click="sendKnownCommand('pd_heartbeat')">PD Heartbeat</button>
-          <button class="cmd-btn" @click="sendKnownCommand('bms_heartbeat')">BMS Heartbeat</button>
-          <button class="cmd-btn" @click="sendKnownCommand('inv_heartbeat')">INV Heartbeat</button>
-          <button class="cmd-btn" @click="sendKnownCommand('mppt_heartbeat')">MPPT Heartbeat</button>
+          <button class="cmd-btn on" @click="sendNamedCommand('ac_on')">AC On</button>
+          <button class="cmd-btn off" @click="sendNamedCommand('ac_off')">AC Off</button>
+          <button class="cmd-btn on" @click="sendNamedCommand('ac_on_xboost')">AC + X-Boost</button>
+          <button class="cmd-btn on" @click="sendNamedCommand('dc_on')">DC 12V On</button>
+          <button class="cmd-btn off" @click="sendNamedCommand('dc_off')">DC 12V Off</button>
         </div>
       </div>
 
       <div class="section">
-        <h4>Output Control</h4>
+        <h4>Charge Settings</h4>
         <div class="button-grid">
-          <button class="cmd-btn on" @click="sendKnownCommand('ac_on')">AC On</button>
-          <button class="cmd-btn off" @click="sendKnownCommand('ac_off')">AC Off</button>
-          <button class="cmd-btn on" @click="sendKnownCommand('dc_on')">DC On</button>
-          <button class="cmd-btn off" @click="sendKnownCommand('dc_off')">DC Off</button>
+          <button class="cmd-btn" @click="sendNamedCommand('max_charge_soc_100')">Max Charge 100%</button>
+          <button class="cmd-btn" @click="sendNamedCommand('max_charge_soc_80')">Max Charge 80%</button>
+          <button class="cmd-btn" @click="sendNamedCommand('min_discharge_soc_0')">Min Discharge 0%</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h4>AC Charge Speed</h4>
+        <div class="button-grid">
+          <button class="cmd-btn" @click="sendNamedCommand('ac_charge_200w')">200W</button>
+          <button class="cmd-btn" @click="sendNamedCommand('ac_charge_600w')">600W</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h4>Other</h4>
+        <div class="button-grid">
+          <button class="cmd-btn" @click="sendNamedCommand('quiet_on')">Quiet Mode On</button>
+          <button class="cmd-btn" @click="sendNamedCommand('quiet_off')">Quiet Mode Off</button>
         </div>
       </div>
 
@@ -115,7 +130,7 @@ function sendRawHex() {
         <div class="raw-form">
           <div class="field wide">
             <label>Hex data (no spaces)</label>
-            <input v-model="rawHex" placeholder="aa03..." />
+            <input v-model="rawHex" placeholder="aa02..." />
           </div>
           <button class="cmd-btn send" @click="sendRawHex">Send Raw</button>
         </div>

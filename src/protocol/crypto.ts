@@ -2,8 +2,20 @@ import { toHex } from './utils';
 
 export interface SessionKeys {
   aesKey: Uint8Array;   // 16-byte AES-128-CBC key
-  iv: Uint8Array;       // 16-byte IV derived from MD5(shared_key)
+  iv: Uint8Array;       // 16-byte IV
   sharedKey: Uint8Array;
+}
+
+// River 2 / Delta 2 Type 1 encryption: derive keys from serial number
+// Key = MD5(serial_number), IV = MD5(reversed_serial_number)
+export async function deriveType1Keys(serialNumber: string): Promise<SessionKeys> {
+  const serialBytes = new TextEncoder().encode(serialNumber);
+  const reversedBytes = new TextEncoder().encode(serialNumber.split('').reverse().join(''));
+
+  const aesKey = md5Impl(serialBytes);
+  const iv = md5Impl(reversedBytes);
+
+  return { aesKey, iv, sharedKey: aesKey };
 }
 
 // MD5 implementation for key derivation

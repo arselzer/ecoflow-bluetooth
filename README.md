@@ -8,15 +8,21 @@ Built with Vue 3 + TypeScript + Vite, using the Web Bluetooth API.
 
 The protocol implementation targets EcoFlow devices that communicate via BLE:
 
-- **River 2 series** (R331, R332, R333)
+**Type 1 encryption (fully supported — key derived from serial number):**
+- **River 2** (R601, R603)
+- **River 2 Max** (R611, R613)
+- **River 2 Pro** (R621, R623)
+- **Delta 2** (DAEB)
+- **Delta 2 Max** (DAEC)
+
+**Type 7 encryption (discovery/monitoring — full control requires login_key.bin):**
 - **River 3 series** (R651, R653, R654, R655)
-- **Delta 2 / Delta 2 Max** (DAEB, DAEC)
 - **Delta 3 series** (P331, P351)
 - **Delta Pro 3** (MR51)
 - **Smart Home Panel 2** (HD31)
 - **Delta Pro Ultra** (Y711)
 
-> **Note:** This is based on community reverse-engineering efforts. Not all features work on all devices. Newer devices use encrypted V2 protocol which requires additional key material.
+> **Note:** This is based on community reverse-engineering efforts (primarily [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble)). River 2 and Delta 2 use Type 1 encryption where the session key is derived from the serial number alone. Newer devices (River 3, Delta 3, etc.) use Type 7 ECDH encryption which requires a `login_key.bin` file extracted from the EcoFlow app.
 
 ## Features
 
@@ -33,34 +39,53 @@ The protocol implementation targets EcoFlow devices that communicate via BLE:
 
 EcoFlow BLE devices use a binary protocol with two packet layers:
 
-### Inner Packet (0xAA prefix)
+### Inner Packet (0xAA prefix, protocol v2)
 ```
-[0xAA][version][length_LE][CRC8]
-[seq_LE_4B][0x00][0x00][src][dst][dsrc][ddst][cmdSet][cmdId][payload...]
-[CRC16_LE]
+[0xAA][version][payload_len_LE][CRC8_header]
+[product_byte][seq_LE_4B][0x00][0x00][src][dst][cmdSet][cmdId][payload...]
+[CRC16_body_LE]
 ```
 
-### Encrypted Packet (0x5A5A prefix) — V2 Protocol
+**XOR obfuscation:** If `seq[0] != 0`, each payload byte is XORed with `seq[0]`.
+
+### Encrypted Packet (0x5A5A prefix)
 ```
-[0x5A5A][frame_type][payload_type][length_LE]
+[0x5A][0x5A][frame_type<<4|flags][0x01][length_LE]
 [AES-CBC encrypted inner packet]
 [CRC16_LE]
 ```
 
-### Encryption (V2 devices)
-- ECDH key exchange (SECP160r1)
-- AES-128-CBC with PKCS7 padding
-- Session key: MD5(login_key[seed] + srand)
-- IV: MD5(shared_key)
+### Encryption
 
-### Command Structure
-Commands are addressed by `cmdSet:cmdId`:
-- `02:01` — PD (Power Delivery) heartbeat
-- `02:02` — BMS (Battery Management) heartbeat  
-- `04:01` — Inverter heartbeat
-- `05:01` — MPPT (Solar) heartbeat
-- `04:31` — AC output toggle
-- `02:31` — DC output toggle
+**Type 1 (River 2, Delta 2):**
+- Key = MD5(serial_number)
+- IV = MD5(reversed_serial_number)
+- AES-128-CBC with null padding
+
+**Type 7 (River 3, Delta 3, SHP2, DPU):**
+- ECDH SECP160r1 key exchange
+- Session key = MD5(login_key[seed] + srand)
+- IV = MD5(shared_key)
+- Requires `login_key.bin` from EcoFlow app
+
+### River 2 Commands
+```
+AC toggle:   cmdSet=0x05, cmdId=0x42, payload=[enabled, xboost]
+DC 12V:      cmdSet=0x05, cmdId=0x51, payload=[enabled]
+Max charge:  cmdSet=0x03, cmdId=0x31, payload=[soc%]
+Min disch:   cmdSet=0x03, cmdId=0x33, payload=[soc%]
+AC charge:   cmdSet=0x05, cmdId=0x45, payload=[watts_LE, 0xFF]
+Quiet mode:  cmdSet=0x05, cmdId=0x53, payload=[enabled]
+```
+
+### Heartbeat Sources
+```
+PD:   src=0x02, cmdSet=0x20, cmdId=0x02 (~155B, battery/power/USB)
+EMS:  src=0x03, cmdSet=0x20, cmdId=0x02 (~46B, charge management)
+BMS:  src=0x03, cmdSet=0x20, cmdId=0x32 (~69B, cell data)
+INV:  src=0x04, cmdId=0x02 (AC input/output)
+MPPT: src=0x05, cmdSet=0x20, cmdId=0x02 (~80B, solar/DC input)
+```
 
 ## Development
 
