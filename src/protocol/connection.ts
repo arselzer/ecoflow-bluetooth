@@ -48,6 +48,7 @@ export class EcoFlowConnection {
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
   private autoReconnect = true;
   private reconnectCount = 0;
+  private reconnecting = false;
 
   // Type 7 ECDH state
   private authState: AuthState = 'idle';
@@ -108,10 +109,12 @@ export class EcoFlowConnection {
       this.identifyDevice();
 
       this.device.addEventListener('gattserverdisconnected', () => {
+        if (this.reconnecting) return; // prevent duplicate reconnect
         this.log('info', 'Device disconnected');
         this.cleanup();
         if (this.autoReconnect) {
-          setTimeout(() => this.attemptReconnect(), 1000);
+          this.reconnecting = true;
+          setTimeout(() => { this.reconnecting = false; this.attemptReconnect(); }, 1000);
         } else {
           this.handlers.onStateChange('disconnected');
         }
@@ -336,10 +339,21 @@ export class EcoFlowConnection {
         if (this.authState === 'auth_sent') {
           // Check for auth error in response
           if (innerPkt && innerPkt.cmdSet === 0x35 && innerPkt.cmdId === 0x86) {
-            // Check payload for error codes
-            if (innerPkt.payload.length > 0 && innerPkt.payload[0] !== 0x00) {
-              this.log('error', `Authentication failed! Response: ${toHex(innerPkt.payload)}`);
-              this.log('error', 'This likely means the User ID does not match the account paired to this device.');
+            const errCode = innerPkt.payload.length > 0 ? innerPkt.payload[0] : -1;
+            const AUTH_ERRORS: Record<number, string> = {
+              0x00: 'Success',
+              0x01: 'NeedRefreshToken — re-login to EcoFlow',
+              0x02: 'DeviceInternalError',
+              0x03: 'DeviceAlreadyBound — device paired to a different account',
+              0x04: 'NeedBindInstallFirst — pair device in EcoFlow app first',
+              0x05: 'AppSendDataError',
+              0x06: 'WrongKey — User ID does not match paired account',
+              0x07: 'MaximumDevicesError',
+            };
+            if (errCode !== 0x00) {
+              const errMsg = AUTH_ERRORS[errCode] ?? `Unknown error code: 0x${errCode.toString(16)}`;
+              this.log('error', `Authentication failed: ${errMsg}`);
+              this.log('error', 'Enter your EcoFlow User ID (ef_uid from app/website cookies) and try again.');
               this.authState = 'idle';
               this.autoReconnect = false;
               this.handlers.onStateChange('disconnected');
@@ -570,6 +584,12 @@ export class EcoFlowConnection {
       toHex(packet.payload).substring(0, 80),
     );
 
+    // Reply to received packets to keep the connection alive
+    // Python ref: replyPacket() in connection.py — device needs replies to send more data
+    if (this.isAuthenticated && this.sessionKeys) {
+      this.replyToPacket(packet);
+    }
+
     if (packet.payload.length > 0) {
       try {
         const { data: telemetry, fields } = parseTelemetryDetailed(
@@ -582,6 +602,27 @@ export class EcoFlowConnection {
         if (Object.keys(telemetry).length > 0) this.handlers.onTelemetry(telemetry);
       } catch { /* */ }
     }
+  }
+
+  // Echo back received packet with src/dst swapped (keeps connection alive)
+  private async replyToPacket(packet: ReturnType<typeof parsePacket>): Promise<void> {
+    if (!packet || !this.sessionKeys) return;
+    // Don't reply to auth packets
+    if (packet.cmdSet === 0x35) return;
+
+    const replyPkt = buildPacket(
+      packet.dst,    // swap src/dst
+      packet.src,
+      packet.cmdSet,
+      packet.cmdId,
+      packet.payload,
+      undefined,     // new seq
+      packet.version,
+      1,             // dsrc
+      1,             // ddst
+    );
+    // Fire-and-forget — don't await to avoid blocking packet processing
+    this.sendEncryptedRaw(replyPkt).catch(() => {});
   }
 
   private async handleEncryptedPacket(data: Uint8Array): Promise<void> {
