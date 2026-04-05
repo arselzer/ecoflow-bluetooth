@@ -128,6 +128,10 @@ export class EcoFlowConnection {
       });
 
       this.log('info', `Found device: ${this.device.name}`);
+
+      // Try to read serial from BLE advertisement manufacturer data
+      await this.readSerialFromAdvertisement();
+
       this.identifyDevice();
 
       // Remove old disconnect handler if any, add fresh one
@@ -426,6 +430,50 @@ export class EcoFlowConnection {
   // ============================================================
   // Device identification
   // ============================================================
+  // Try to read the full serial number from BLE manufacturer advertisement data
+  // Serial is at bytes 1-17 (16 chars) of manufacturer data with company ID 0xB5B5
+  private async readSerialFromAdvertisement(): Promise<void> {
+    if (!this.device || this.serialOverride) return; // skip if manual serial provided
+
+    // watchAdvertisements() is available in Chrome 87+
+    if (!('watchAdvertisements' in this.device)) {
+      this.log('info', 'watchAdvertisements not available — serial must be entered manually');
+      return;
+    }
+
+    try {
+      const adv = await new Promise<BluetoothAdvertisingEvent | null>((resolve) => {
+        const timeout = setTimeout(() => {
+          this.device!.removeEventListener('advertisementreceived', handler);
+          resolve(null);
+        }, 3000);
+
+        const handler = (event: Event) => {
+          clearTimeout(timeout);
+          this.device!.removeEventListener('advertisementreceived', handler);
+          resolve(event as BluetoothAdvertisingEvent);
+        };
+
+        this.device!.addEventListener('advertisementreceived', handler);
+        (this.device as any).watchAdvertisements({ signal: AbortSignal.timeout(3000) }).catch(() => {});
+      });
+
+      if (adv && adv.manufacturerData) {
+        const mfrData = adv.manufacturerData.get(MANUFACTURER_ID);
+        if (mfrData && mfrData.byteLength >= 17) {
+          const serialBytes = new Uint8Array(mfrData.buffer, mfrData.byteOffset + 1, 16);
+          const serial = new TextDecoder().decode(serialBytes).replace(/\0/g, '');
+          if (serial.length > 0) {
+            this.log('info', `Serial from BLE advertisement: ${serial}`);
+            this.serialOverride = serial;
+          }
+        }
+      }
+    } catch (e) {
+      this.log('info', `Could not read advertisement data: ${e}`);
+    }
+  }
+
   private identifyDevice(): void {
     if (!this.device) return;
     const name = this.device.name ?? '';

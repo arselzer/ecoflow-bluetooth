@@ -119,6 +119,16 @@ npm run build
 npm run preview
 ```
 
+## Compatibility with EcoFlow App / Home Assistant
+
+This tool uses the **bind command (0x35:85)** to register a user hash on the device. This is the same mechanism the official app uses, just with a different user ID.
+
+- **Home Assistant (ha-ef-ble):** Use the same User ID you entered in this web app (default: `0000000000000000`). Enter it as the User ID in the HA integration configuration.
+- **Official EcoFlow app:** The app will try to bind with your cloud account's user ID. If the device was previously bound via this tool, the app may need to re-bind. A **factory reset** on the device (physical button combo — check your device manual) should clear all BLE bindings.
+- **Reverting:** Factory reset the device to clear the binding, then pair normally through the EcoFlow app.
+
+The bind is **not permanent** — EcoFlow devices support re-binding. This tool does not modify firmware or make irreversible changes.
+
 ## References
 
 - [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble) — Home Assistant EcoFlow BLE integration (most complete implementation)

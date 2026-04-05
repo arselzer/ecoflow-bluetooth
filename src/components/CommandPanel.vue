@@ -79,11 +79,15 @@ function sendRawHex() {
       </div>
 
       <div class="section">
-        <h4>Bind / Auth (experimental)</h4>
-        <p class="hint">0x35:85 responded during scanning — might be the bind command.</p>
+        <h4>Bind / Auth</h4>
+        <p class="hint">
+          Binding registers a user hash on the device. The auto-connect flow does this automatically.
+          If you need to re-bind with a different user ID (e.g., for EcoFlow app or Home Assistant),
+          you can use these controls. Factory reset on the device should also clear bindings.
+        </p>
         <div class="button-grid">
-          <button class="cmd-btn bind" @click="queryBindStatus">Query 0x35:85 (empty)</button>
-          <button class="cmd-btn bind" @click="tryBind">Try Bind 0x35:85 (with auth hash)</button>
+          <button class="cmd-btn bind" @click="queryBindStatus">Query Bind Status</button>
+          <button class="cmd-btn bind" @click="tryBind">Bind (0x35:85)</button>
         </div>
       </div>
 
