@@ -37,46 +37,55 @@ const stateColors: Record<ConnectionState, string> = {
 
 <template>
   <div class="connection-panel">
-    <div class="status">
-      <span class="dot" :style="{ background: stateColors[state] }"></span>
-      <span class="label">{{ stateLabels[state] }}</span>
-      <span v-if="deviceName" class="device-name">{{ deviceName }}</span>
+    <div class="top-row">
+      <div class="status">
+        <span class="dot" :style="{ background: stateColors[state] }"></span>
+        <span class="label">{{ stateLabels[state] }}</span>
+        <span v-if="deviceName" class="device-name">{{ deviceName }}</span>
+      </div>
+      <div class="actions">
+        <template v-if="state === 'disconnected'">
+          <button class="btn secondary" @click="emit('clear')">Clear</button>
+          <button class="btn primary" @click="handleConnect">Connect</button>
+        </template>
+        <template v-else>
+          <button
+            class="btn danger"
+            :disabled="state === 'connecting'"
+            @click="emit('disconnect')"
+          >
+            Disconnect
+          </button>
+        </template>
+      </div>
     </div>
-    <div class="actions">
-      <template v-if="state === 'disconnected'">
-        <div class="user-id-field">
-          <input
-            v-model="userId"
-            placeholder="EcoFlow User ID (optional)"
-            class="user-id-input"
-            title="Required for Type 7 devices (River 3, Delta 3). Get from EcoFlow app ef_uid cookie. Leave empty for Type 1 devices (River 2, Delta 2)."
-          />
-        </div>
-        <button class="btn secondary" @click="emit('clear')">Clear</button>
-        <button class="btn primary" @click="handleConnect">Connect</button>
-      </template>
-      <template v-else>
-        <button
-          class="btn danger"
-          :disabled="state === 'connecting'"
-          @click="emit('disconnect')"
-        >
-          Disconnect
-        </button>
-      </template>
+    <div v-if="state === 'disconnected'" class="user-id-row">
+      <input
+        v-model="userId"
+        placeholder="EcoFlow User ID (optional — needed for River 3, Delta 3)"
+        class="user-id-input"
+        title="Get from EcoFlow app ef_uid cookie or API login. Leave empty to try default."
+      />
     </div>
   </div>
 </template>
 
 <style scoped>
 .connection-panel {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
   padding: 12px 16px;
   background: #1e1e2e;
   border-radius: 8px;
   border: 1px solid #333;
+}
+
+.top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.user-id-row {
+  margin-top: 8px;
 }
 
 .status {
@@ -149,11 +158,6 @@ const stateColors: Record<ConnectionState, string> = {
   cursor: not-allowed;
 }
 
-.user-id-field {
-  display: flex;
-  align-items: center;
-}
-
 .user-id-input {
   padding: 6px 10px;
   background: #2a2a3e;
@@ -162,7 +166,7 @@ const stateColors: Record<ConnectionState, string> = {
   color: #e0e0e0;
   font-family: monospace;
   font-size: 0.85em;
-  width: 200px;
+  width: 100%;
 }
 
 .user-id-input:focus {
