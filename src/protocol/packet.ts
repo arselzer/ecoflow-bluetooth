@@ -9,8 +9,16 @@ export function nextSequence(): number {
   return sequenceCounter++;
 }
 
-// Build an inner EcoFlow packet (0xAA prefix, protocol version 2)
-// Format: [0xAA][version][length_LE][CRC8][product_byte][seq_4B][0x00 0x00][src][dst][cmdSet][cmdId][payload][CRC16]
+// Build an inner EcoFlow packet (0xAA prefix)
+// Python ref: Packet.toBytes() in rabits/ha-ef-ble
+//
+// Header: [0xAA][version][payload_length_LE][CRC8_of_header]
+// Body:   [product_byte][seq_4B_LE][0x00][0x00][src][dst]
+//         [dsrc][ddst]  <-- only in v3+
+//         [cmdSet][cmdId][payload]
+// Footer: [CRC16_of_entire_packet_LE]
+//
+// IMPORTANT: payload_length = len(payload), NOT len(body)
 export function buildPacket(
   src: number,
   dst: number,
@@ -18,48 +26,53 @@ export function buildPacket(
   cmdId: number,
   payload: Uint8Array,
   seq?: number,
+  version: number = 3,
+  dsrc: number = 1,
+  ddst: number = 1,
 ): Uint8Array {
-  const version = 0x02; // Protocol version 2 for River 2
   const seqNum = seq ?? nextSequence();
   const productByte = 0x0d; // product_id >= 0
 
-  // Body: product_byte + seq(4) + reserved(2) + src + dst + cmdSet + cmdId + payload
-  const body = concatBytes(
-    new Uint8Array([productByte]),
-    writeUint32LE(seqNum),
-    new Uint8Array([0x00, 0x00]),  // reserved
-    new Uint8Array([src, dst]),
-    new Uint8Array([cmdSet, cmdId]),
-    payload,
-  );
-
-  // XOR obfuscation: if seq[0] != 0, XOR the payload portion
-  const seqByte0 = seqNum & 0xff;
-  if (seqByte0 !== 0 && payload.length > 0) {
-    // The payload starts at offset 11 within body (after product+seq+reserved+src+dst+cmdSet+cmdId)
-    const payloadStart = 11;
-    for (let i = payloadStart; i < body.length; i++) {
-      body[i] ^= seqByte0;
-    }
-  }
-
-  // Payload length field = body length + 2 (for CRC16)
-  const payloadLen = body.length + 2;
-
-  // Header: 0xAA + version + length_LE(2)
+  // Header: 0xAA + version + payload_length(2 LE)
+  // payload_length = len(command payload), matching Python's struct.pack("<H", len(self._payload))
   const header = new Uint8Array([
     PACKET_PREFIX,
     version,
-    payloadLen & 0xff,
-    (payloadLen >> 8) & 0xff,
+    payload.length & 0xff,
+    (payload.length >> 8) & 0xff,
   ]);
-
   const headerCrcVal = crc8(header);
 
-  // CRC16 over body
-  const bodyCrcVal = crc16(body);
+  // Build body after header+crc8
+  let body: Uint8Array;
+  if (version >= 3) {
+    body = concatBytes(
+      new Uint8Array([productByte]),
+      writeUint32LE(seqNum),
+      new Uint8Array([0x00, 0x00]),  // reserved
+      new Uint8Array([src, dst]),
+      new Uint8Array([dsrc, ddst]),  // v3+ fields
+      new Uint8Array([cmdSet, cmdId]),
+      payload,
+    );
+  } else {
+    body = concatBytes(
+      new Uint8Array([productByte]),
+      writeUint32LE(seqNum),
+      new Uint8Array([0x00, 0x00]),  // reserved
+      new Uint8Array([src, dst]),
+      new Uint8Array([cmdSet, cmdId]),
+      payload,
+    );
+  }
 
-  return concatBytes(header, new Uint8Array([headerCrcVal]), body, writeUint16LE(bodyCrcVal));
+  // Full data = header + crc8 + body
+  const withoutCrc16 = concatBytes(header, new Uint8Array([headerCrcVal]), body);
+
+  // CRC16 over everything so far
+  const crc16Val = crc16(withoutCrc16);
+
+  return concatBytes(withoutCrc16, writeUint16LE(crc16Val));
 }
 
 // Build an encrypted outer packet (0x5A5A prefix)
@@ -83,12 +96,15 @@ export function buildEncPacket(
 }
 
 // Parse an inner packet (0xAA prefix)
+// Python ref: Packet.fromBytes() in rabits/ha-ef-ble
+// Header: [0xAA][version][payload_length_LE][CRC8]
+// payload_length = length of just the command payload
 export function parsePacket(data: Uint8Array): EcoFlowPacket | null {
   if (data.length < 10) return null;
   if (data[0] !== PACKET_PREFIX) return null;
 
   const version = data[1];
-  const length = readUint16LE(data, 2);
+  const payloadLength = readUint16LE(data, 2);
   const headerCrcVal = data[4];
 
   // Verify header CRC8
@@ -97,78 +113,55 @@ export function parsePacket(data: Uint8Array): EcoFlowPacket | null {
     console.warn('[Packet] Header CRC8 mismatch:', headerCrcVal.toString(16), 'vs', computedHeaderCrc.toString(16));
   }
 
+  // Determine inner overhead based on version
+  // v2: product(1) + seq(4) + reserved(2) + src(1) + dst(1) + cmdSet(1) + cmdId(1) = 11
+  // v3+: product(1) + seq(4) + reserved(2) + src(1) + dst(1) + dsrc(1) + ddst(1) + cmdSet(1) + cmdId(1) = 13
+  const innerOverhead = version >= 3 ? 13 : 11;
+
+  // Total packet = header(4) + crc8(1) + innerOverhead + payloadLength + crc16(2)
+  const totalLen = 5 + innerOverhead + payloadLength + 2;
+  if (data.length < totalLen) return null;
+
+  // Parse fields after header+crc8
   const bodyStart = 5;
-  // Body length = length - 2 (CRC16)
-  const bodyLen = length - 2;
-  const bodyEnd = bodyStart + bodyLen;
+  // body[0] = product_byte
+  const seq = readUint32LE(data, bodyStart + 1);
+  // bodyStart+5, bodyStart+6 = reserved
+  const src = data[bodyStart + 7];
+  const dst = data[bodyStart + 8];
 
-  if (bodyEnd + 2 > data.length) return null;
+  let dsrc: number, ddst: number, cmdSet: number, cmdId: number;
+  let payloadStart: number;
 
-  const body = data.slice(bodyStart, bodyEnd);
-
-  // Parse based on protocol version
-  let src: number, dst: number, dsrc: number, ddst: number, cmdSet: number, cmdId: number;
-  let payload: Uint8Array;
-  let seq: number;
-
-  // Version 2: product_byte + seq(4) + reserved(2) + src + dst + cmdSet + cmdId + payload
-  if (version === 2 || version === 0x02) {
-    if (body.length < 11) return null;
-    // body[0] = product_byte
-    seq = readUint32LE(body, 1);
-    // body[5], body[6] = reserved
-    src = body[7];
-    dst = body[8];
-    dsrc = 0;
-    ddst = 0;
-    cmdSet = body[9];
-    cmdId = body[10];
-    payload = body.slice(11);
-
-    // Undo XOR obfuscation
-    const seqByte0 = seq & 0xff;
-    if (seqByte0 !== 0 && payload.length > 0) {
-      payload = new Uint8Array(payload);
-      for (let i = 0; i < payload.length; i++) {
-        payload[i] ^= seqByte0;
-      }
-    }
-  }
-  // Version 3/4: product_byte + seq(4) + reserved(2) + src + dst + dsrc + ddst + cmdSet + cmdId + payload
-  else if (version === 3 || version === 4 || version === 0x13) {
-    if (body.length < 13) return null;
-    seq = readUint32LE(body, 1);
-    src = body[7];
-    dst = body[8];
-    dsrc = body[9];
-    ddst = body[10];
-    cmdSet = body[11];
-    cmdId = body[12];
-    payload = body.slice(13);
-
-    const seqByte0 = seq & 0xff;
-    if (seqByte0 !== 0 && payload.length > 0) {
-      payload = new Uint8Array(payload);
-      for (let i = 0; i < payload.length; i++) {
-        payload[i] ^= seqByte0;
-      }
-    }
+  if (version >= 3) {
+    dsrc = data[bodyStart + 9];
+    ddst = data[bodyStart + 10];
+    cmdSet = data[bodyStart + 11];
+    cmdId = data[bodyStart + 12];
+    payloadStart = bodyStart + 13;
   } else {
-    // Unknown version — best effort
-    seq = body.length >= 5 ? readUint32LE(body, 1) : 0;
-    src = body.length > 7 ? body[7] : 0;
-    dst = body.length > 8 ? body[8] : 0;
     dsrc = 0;
     ddst = 0;
-    cmdSet = body.length > 9 ? body[9] : 0;
-    cmdId = body.length > 10 ? body[10] : 0;
-    payload = body.length > 11 ? body.slice(11) : new Uint8Array(0);
+    cmdSet = data[bodyStart + 9];
+    cmdId = data[bodyStart + 10];
+    payloadStart = bodyStart + 11;
   }
 
-  const crc16Val = readUint16LE(data, bodyEnd);
+  let payload = data.slice(payloadStart, payloadStart + payloadLength);
 
-  // Verify CRC16
-  const computedCrc16 = crc16(body);
+  // Undo XOR obfuscation
+  const seqByte0 = seq & 0xff;
+  if (seqByte0 !== 0 && payload.length > 0) {
+    payload = new Uint8Array(payload);
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] ^= seqByte0;
+    }
+  }
+
+  // CRC16 at end — covers everything before it
+  const crc16Offset = payloadStart + payloadLength;
+  const crc16Val = readUint16LE(data, crc16Offset);
+  const computedCrc16 = crc16(data.slice(0, crc16Offset));
   if (computedCrc16 !== crc16Val) {
     console.warn('[Packet] CRC16 mismatch:', crc16Val.toString(16), 'vs', computedCrc16.toString(16));
   }
@@ -176,7 +169,7 @@ export function parsePacket(data: Uint8Array): EcoFlowPacket | null {
   return {
     header: PACKET_PREFIX,
     version,
-    length,
+    length: payloadLength,
     headerCrc: headerCrcVal,
     seq,
     src,

@@ -543,8 +543,11 @@ export class EcoFlowConnection {
         await this.handleEncryptedPacket(packetData);
       } else if (type === 'inner') {
         if (this.packetBuffer.length < 5) return;
+        const version = this.packetBuffer[1];
         const payloadLen = this.packetBuffer[2] | (this.packetBuffer[3] << 8);
-        const totalLen = 5 + payloadLen;
+        const innerOverhead = version >= 3 ? 13 : 11;
+        // total = header(4) + crc8(1) + innerOverhead + payloadLen + crc16(2)
+        const totalLen = 5 + innerOverhead + payloadLen + 2;
         if (this.packetBuffer.length < totalLen) return;
         const packetData = this.packetBuffer.slice(0, totalLen);
         this.packetBuffer = this.packetBuffer.slice(totalLen);

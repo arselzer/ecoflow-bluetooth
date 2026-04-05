@@ -23,12 +23,12 @@ describe('CRC', () => {
 });
 
 describe('Inner Packet (0xAA)', () => {
-  it('should build and parse a round-trip packet', () => {
+  it('should build and parse a round-trip packet (v3)', () => {
     const payload = new Uint8Array([0x01, 0x02, 0x03]);
     const packet = buildPacket(0x20, 0x01, 0x05, 0x42, payload, 0);
 
     expect(packet[0]).toBe(0xaa); // prefix
-    expect(packet[1]).toBe(0x02); // version 2
+    expect(packet[1]).toBe(0x03); // version 3 (default)
 
     const parsed = parsePacket(packet);
     expect(parsed).not.toBeNull();
@@ -36,20 +36,21 @@ describe('Inner Packet (0xAA)', () => {
     expect(parsed!.dst).toBe(0x01);
     expect(parsed!.cmdSet).toBe(0x05);
     expect(parsed!.cmdId).toBe(0x42);
-    // With seq=0, no XOR obfuscation
+    expect(parsed!.dsrc).toBe(1);
+    expect(parsed!.ddst).toBe(1);
     expect(toHex(parsed!.payload)).toBe(toHex(payload));
   });
 
-  it('should apply and undo XOR obfuscation when seq[0] != 0', () => {
-    const payload = new Uint8Array([0xAA, 0xBB, 0xCC]);
-    const seq = 5; // seq[0] = 0x05
-    const packet = buildPacket(0x20, 0x01, 0x02, 0x01, payload, seq);
+  it('should build v2 packets without dsrc/ddst', () => {
+    const payload = new Uint8Array([0x01]);
+    const packet = buildPacket(0x20, 0x01, 0x02, 0x01, payload, 0, 2);
 
-    // The raw packet payload should be XORed
+    expect(packet[1]).toBe(0x02); // version 2
     const parsed = parsePacket(packet);
     expect(parsed).not.toBeNull();
-    // After parsing, XOR should be undone
-    expect(toHex(parsed!.payload)).toBe(toHex(payload));
+    expect(parsed!.dsrc).toBe(0);
+    expect(parsed!.ddst).toBe(0);
+    expect(toHex(parsed!.payload)).toBe('01');
   });
 
   it('should have correct header CRC8', () => {
