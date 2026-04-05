@@ -808,9 +808,9 @@ export class EcoFlowConnection {
     await this.writeBytesWithResponse(encPacket);
   }
 
-  async sendRawCommand(src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array): Promise<void> {
+  async sendRawCommand(src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array, version?: number): Promise<void> {
     if (!this.writeChar) { this.log('error', 'Not connected'); return; }
-    const packet = buildPacket(src, dst, cmdSet, cmdId, payload);
+    const packet = buildPacket(src, dst, cmdSet, cmdId, payload, undefined, version);
 
     if (this.sessionKeys) {
       await this.sendEncryptedRaw(packet);

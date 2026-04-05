@@ -127,8 +127,8 @@ function handleClear() {
   sessionStorage.clear();
 }
 
-function handleCommand(src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array) {
-  connection.sendRawCommand(src, dst, cmdSet, cmdId, payload);
+function handleCommand(src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array, version?: number) {
+  connection.sendRawCommand(src, dst, cmdSet, cmdId, payload, version);
 }
 
 function handleRawBytes(hex: string) {

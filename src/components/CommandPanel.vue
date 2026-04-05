@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { RIVER2_COMMANDS, fromHex, generateAuthPayload } from '../protocol';
+import { fromHex, generateAuthPayload } from '../protocol';
 
 const props = defineProps<{
   connected: boolean;
@@ -10,7 +10,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  command: [src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array];
+  command: [src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array, version?: number];
   rawBytes: [hex: string];
 }>();
 
@@ -38,6 +38,45 @@ function tryUnbind85zero() { emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Ar
 function tryUnbind87empty() { emit('command', 0x21, 0x35, 0x35, 0x87, new Uint8Array(0)); }
 function tryUnbind88empty() { emit('command', 0x21, 0x35, 0x35, 0x88, new Uint8Array(0)); }
 
+// River 3 config commands — protobuf ConfigWrite via cmdSet=0xFE, cmdId=0x11, version=0x13
+// Packet: src=0x20, dst=0x02
+function encodeProtobufBool(fieldNum: number, value: boolean): Uint8Array {
+  const tag = (fieldNum << 3) | 0; // varint wire type
+  const bytes: number[] = [];
+  let t = tag;
+  while (t > 0x7f) { bytes.push((t & 0x7f) | 0x80); t >>>= 7; }
+  bytes.push(t & 0x7f);
+  bytes.push(value ? 1 : 0);
+  return new Uint8Array(bytes);
+}
+
+function encodeProtobufUint32(fieldNum: number, value: number): Uint8Array {
+  const tag = (fieldNum << 3) | 0;
+  const bytes: number[] = [];
+  let t = tag;
+  while (t > 0x7f) { bytes.push((t & 0x7f) | 0x80); t >>>= 7; }
+  bytes.push(t & 0x7f);
+  let v = value;
+  while (v > 0x7f) { bytes.push((v & 0x7f) | 0x80); v >>>= 7; }
+  bytes.push(v & 0x7f);
+  return new Uint8Array(bytes);
+}
+
+// River 3 commands use version 0x13 for config packets
+function sendR3Config(payload: Uint8Array) {
+  // src=0x20, dst=0x02, cmdSet=0xFE, cmdId=0x11, version=0x13
+  emit('command', 0x20, 0x02, 0xfe, 0x11, payload, 0x13);
+}
+
+function r3AcOn() { sendR3Config(encodeProtobufBool(76, true)); }
+function r3AcOff() { sendR3Config(encodeProtobufBool(76, false)); }
+function r3DcOn() { sendR3Config(encodeProtobufBool(20, true)); }
+function r3DcOff() { sendR3Config(encodeProtobufBool(20, false)); }
+function r3Dc12vOn() { sendR3Config(encodeProtobufBool(18, true)); }
+function r3Dc12vOff() { sendR3Config(encodeProtobufBool(18, false)); }
+function r3XboostOn() { sendR3Config(encodeProtobufBool(25, true)); }
+function r3XboostOff() { sendR3Config(encodeProtobufBool(25, false)); }
+
 // Custom command fields
 const customSrc = ref('20');
 const customDst = ref('01');
@@ -45,13 +84,6 @@ const customCmdSet = ref('02');
 const customCmdId = ref('01');
 const customPayload = ref('');
 const rawHex = ref('');
-
-function sendNamedCommand(key: string) {
-  const cmd = RIVER2_COMMANDS[key];
-  if (!cmd) return;
-  const payload = cmd.payloads?.default ? fromHex(cmd.payloads.default) : new Uint8Array(0);
-  emit('command', cmd.src, cmd.dst, cmd.cmdSet, cmd.cmdId, payload);
-}
 
 function sendCustomCommand() {
   try {
@@ -111,38 +143,27 @@ function sendRawHex() {
       </div>
 
       <div class="section">
-        <h4>Output Control (River 2)</h4>
+        <h4>Output Control (River 3)</h4>
+        <p class="hint">Protobuf ConfigWrite via cmdSet=0xFE, cmdId=0x11. Watch telemetry for ac_enabled/dc_enabled changes.</p>
         <div class="button-grid">
-          <button class="cmd-btn on" @click="sendNamedCommand('ac_on')">AC On</button>
-          <button class="cmd-btn off" @click="sendNamedCommand('ac_off')">AC Off</button>
-          <button class="cmd-btn on" @click="sendNamedCommand('ac_on_xboost')">AC + X-Boost</button>
-          <button class="cmd-btn on" @click="sendNamedCommand('dc_on')">DC 12V On</button>
-          <button class="cmd-btn off" @click="sendNamedCommand('dc_off')">DC 12V Off</button>
+          <button class="cmd-btn on" @click="r3AcOn">AC On</button>
+          <button class="cmd-btn off" @click="r3AcOff">AC Off</button>
+          <button class="cmd-btn on" @click="r3DcOn">DC On</button>
+          <button class="cmd-btn off" @click="r3DcOff">DC Off</button>
+          <button class="cmd-btn on" @click="r3Dc12vOn">12V On</button>
+          <button class="cmd-btn off" @click="r3Dc12vOff">12V Off</button>
+          <button class="cmd-btn on" @click="r3XboostOn">X-Boost On</button>
+          <button class="cmd-btn off" @click="r3XboostOff">X-Boost Off</button>
         </div>
       </div>
 
       <div class="section">
-        <h4>Charge Settings</h4>
+        <h4>Charge Settings (River 3)</h4>
         <div class="button-grid">
-          <button class="cmd-btn" @click="sendNamedCommand('max_charge_soc_100')">Max Charge 100%</button>
-          <button class="cmd-btn" @click="sendNamedCommand('max_charge_soc_80')">Max Charge 80%</button>
-          <button class="cmd-btn" @click="sendNamedCommand('min_discharge_soc_0')">Min Discharge 0%</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4>AC Charge Speed</h4>
-        <div class="button-grid">
-          <button class="cmd-btn" @click="sendNamedCommand('ac_charge_200w')">200W</button>
-          <button class="cmd-btn" @click="sendNamedCommand('ac_charge_600w')">600W</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <h4>Other</h4>
-        <div class="button-grid">
-          <button class="cmd-btn" @click="sendNamedCommand('quiet_on')">Quiet Mode On</button>
-          <button class="cmd-btn" @click="sendNamedCommand('quiet_off')">Quiet Mode Off</button>
+          <button class="cmd-btn" @click="sendR3Config(encodeProtobufUint32(33, 100))">Max Charge 100%</button>
+          <button class="cmd-btn" @click="sendR3Config(encodeProtobufUint32(33, 80))">Max Charge 80%</button>
+          <button class="cmd-btn" @click="sendR3Config(encodeProtobufUint32(34, 0))">Min Discharge 0%</button>
+          <button class="cmd-btn" @click="sendR3Config(encodeProtobufUint32(34, 20))">Min Discharge 20%</button>
         </div>
       </div>
 
