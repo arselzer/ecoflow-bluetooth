@@ -673,12 +673,12 @@ export class EcoFlowConnection {
   // Python ref: SysUTCSync protobuf with sys_utc_time field
   // Simple protobuf: field 1 (varint) = unix timestamp in seconds
   private async sendTimeSync(): Promise<void> {
-    this.log('info', 'Sending UTC time sync...');
+    this.log('info', 'Sending RTC time sync...');
     const now = Math.floor(Date.now() / 1000);
     // Encode as protobuf varint: field 1 (tag=0x08), then varint value
     const payload = encodeProtobufVarint(1, now);
-    // Python sends: src=0x21, dst=0x01, cmdSet=0x01, cmdId=0x55
-    await this.sendRawCommand(0x21, DST_DEVICE, 0x01, 0x55, payload);
+    // Python: Packet(0x21, auth_header_dst=0x35, 0x01, 0x52=NET_BLE_COMMAND_CMD_SET_RET_TIME)
+    await this.sendRawCommand(0x21, 0x35, 0x01, 0x52, payload);
   }
 
   private async writeBytes(data: Uint8Array): Promise<void> {
@@ -691,12 +691,24 @@ export class EcoFlowConnection {
     }
   }
 
+  // Write with response — used for encrypted packets (Python: write_with_response=True)
+  private async writeBytesWithResponse(data: Uint8Array): Promise<void> {
+    if (!this.writeChar) return;
+    this.handlers.onRawPacket('tx', data);
+    try {
+      await this.writeChar.writeValue(data);
+    } catch {
+      try { await this.writeChar.writeValueWithoutResponse(data); } catch (e) { this.log('error', `Write failed: ${e}`); }
+    }
+  }
+
   private async sendEncryptedRaw(innerPacket: Uint8Array): Promise<void> {
     if (!this.sessionKeys) return;
     const encrypted = await encryptAesCbc(innerPacket, this.sessionKeys.aesKey, this.sessionKeys.iv);
     const encPacket = buildEncPacket(FRAME_TYPE_PROTOCOL, encrypted);
     this.log('tx', `[ENC] ${encPacket.length}B`, toHex(encPacket).substring(0, 80));
-    await this.writeBytes(encPacket);
+    // Use write-with-response for encrypted packets (Python: write_with_response=True)
+    await this.writeBytesWithResponse(encPacket);
   }
 
   async sendRawCommand(src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array): Promise<void> {
