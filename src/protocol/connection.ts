@@ -637,7 +637,10 @@ export class EcoFlowConnection {
   }
 
   private handleInnerPacket(data: Uint8Array): void {
-    const packet = parsePacket(data);
+    // v19 (0x13) telemetry packets use XOR obfuscation; v3 auth packets don't
+    const version = data.length > 1 ? data[1] : 0;
+    const xorPayload = version === 0x13;
+    const packet = parsePacket(data, xorPayload);
     if (!packet) { this.log('rx', 'Failed to parse', toHex(data).substring(0, 60)); return; }
 
     const hbType = identifyHeartbeat(packet.src, packet.cmdId);
