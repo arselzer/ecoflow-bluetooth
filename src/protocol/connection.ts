@@ -381,10 +381,12 @@ export class EcoFlowConnection {
             if (errCode !== 0x00) {
               const errMsg = AUTH_ERRORS[errCode] ?? `Unknown error code: 0x${errCode.toString(16)}`;
               this.log('error', `Authentication failed: ${errMsg}`);
-              this.log('error', 'Enter your EcoFlow User ID (ef_uid from app/website cookies) and try again.');
-              this.authState = 'idle';
+              this.log('error', 'Session keys are valid — you can use Scanner/Commands for ~10s before device disconnects.');
+              this.log('info', 'Try the Bind Discovery presets in the Scanner tab to probe for bind commands.');
+              // Stay "connected" with valid session keys so user can scan
+              this.authState = 'authenticated';
               this.autoReconnect = false;
-              this.handlers.onStateChange('disconnected');
+              this.handlers.onStateChange('connected');
               return true;
             }
           }

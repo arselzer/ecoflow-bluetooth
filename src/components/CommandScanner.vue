@@ -130,6 +130,28 @@ function stopScan() {
     </div>
 
     <div class="presets">
+      <h4>Bind Discovery (probe for bind commands)</h4>
+      <p class="description">
+        Send auth-like payloads on cmdSet 0x35 to find the bind command.
+        Known: 0x86=auth, 0x89=auth status. Try nearby cmdIds with auth payload.
+      </p>
+      <div class="preset-grid">
+        <button class="preset bind" @click="scanSrc = '21'; scanDst = '35'; scanCmdSet = '35'; scanIdFrom = '80'; scanIdTo = '8f'; scanPayload = ''; scanDelay = 1000" :disabled="scanning">
+          0x35:80-8F (near auth)
+        </button>
+        <button class="preset bind" @click="scanSrc = '21'; scanDst = '35'; scanCmdSet = '35'; scanIdFrom = '00'; scanIdTo = '20'; scanPayload = ''; scanDelay = 1000" :disabled="scanning">
+          0x35:00-20 (low range)
+        </button>
+        <button class="preset bind" @click="scanSrc = '21'; scanDst = '35'; scanCmdSet = '35'; scanIdFrom = '00'; scanIdTo = 'ff'; scanPayload = ''; scanDelay = 800" :disabled="scanning">
+          0x35:00-FF (full auth set)
+        </button>
+        <button class="preset bind" @click="scanSrc = '21'; scanDst = '35'; scanCmdSet = '53'; scanIdFrom = '00'; scanIdTo = '60'; scanPayload = ''; scanDelay = 1000" :disabled="scanning">
+          0x53:00-60 (BLE/WiFi module)
+        </button>
+      </div>
+    </div>
+
+    <div class="presets">
       <h4>CmdSet Presets</h4>
       <div class="preset-grid">
         <button class="preset" @click="scanCmdSet = '01'" :disabled="scanning">0x01 (System)</button>
@@ -314,6 +336,11 @@ h4 {
 .preset.full {
   border-color: #f59e0b;
   color: #f59e0b;
+}
+
+.preset.bind {
+  border-color: #a855f7;
+  color: #a855f7;
 }
 
 .preset:disabled {
