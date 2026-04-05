@@ -19,6 +19,26 @@ watch(() => props.packets.length, () => {
   }
 });
 
+function exportPackets() {
+  const data = {
+    exported: new Date().toISOString(),
+    packetCount: props.packets.length,
+    packets: props.packets.map(p => ({
+      ts: p.timestamp,
+      dir: p.direction,
+      hex: toHex(p.data),
+      len: p.data.length,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ecoflow-packets-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
     hour12: false,
@@ -34,9 +54,12 @@ function formatTime(ts: number): string {
   <div class="raw-packets">
     <div class="header">
       <h3>Raw Packets ({{ packets.length }})</h3>
-      <label class="auto-scroll">
-        <input type="checkbox" v-model="autoScroll" /> Auto-scroll
-      </label>
+      <div class="controls">
+        <label class="auto-scroll">
+          <input type="checkbox" v-model="autoScroll" /> Auto-scroll
+        </label>
+        <button class="btn" @click="exportPackets">Save .json</button>
+      </div>
     </div>
     <div ref="container" class="packet-container">
       <div

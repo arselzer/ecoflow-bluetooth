@@ -37,19 +37,19 @@ function formatTime(ts: number): string {
   } as Intl.DateTimeFormatOptions);
 }
 
-function copyAll() {
-  const text = props.entries.map(e => {
-    const time = formatTime(e.timestamp);
-    const dir = e.direction.toUpperCase().padEnd(5);
-    const data = e.data ? ` [${e.data}]` : '';
-    return `${time} ${dir} ${e.message}${data}`;
-  }).join('\n');
+function formatEntry(e: LogEntry): string {
+  const time = formatTime(e.timestamp);
+  const dir = e.direction.toUpperCase().padEnd(5);
+  const data = e.data ? ` [${e.data}]` : '';
+  return `${time} ${dir} ${e.message}${data}`;
+}
 
+function copyAll() {
+  const text = props.entries.map(formatEntry).join('\n');
   navigator.clipboard.writeText(text).then(() => {
     copied.value = true;
     setTimeout(() => { copied.value = false; }, 2000);
   }).catch(() => {
-    // Fallback for non-HTTPS
     const ta = document.createElement('textarea');
     ta.value = text;
     document.body.appendChild(ta);
@@ -59,6 +59,37 @@ function copyAll() {
     copied.value = true;
     setTimeout(() => { copied.value = false; }, 2000);
   });
+}
+
+function exportLog() {
+  const text = props.entries.map(formatEntry).join('\n');
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ecoflow-log-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportJson() {
+  const data = {
+    exported: new Date().toISOString(),
+    entryCount: props.entries.length,
+    entries: props.entries.map(e => ({
+      ts: e.timestamp,
+      dir: e.direction,
+      msg: e.message,
+      hex: e.data ?? null,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ecoflow-log-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 </script>
 
@@ -70,7 +101,9 @@ function copyAll() {
         <label class="auto-scroll">
           <input type="checkbox" v-model="autoScroll" /> Auto-scroll
         </label>
-        <button class="btn" @click="copyAll">{{ copied ? 'Copied!' : 'Copy All' }}</button>
+        <button class="btn" @click="copyAll">{{ copied ? 'Copied!' : 'Copy' }}</button>
+        <button class="btn" @click="exportLog">Save .txt</button>
+        <button class="btn" @click="exportJson">Save .json</button>
       </div>
     </div>
     <div ref="container" class="log-container">
