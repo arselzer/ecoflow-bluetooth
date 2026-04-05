@@ -88,14 +88,26 @@ export class EcoFlowConnection {
   }
 
   private connecting = false;
+  private disconnectHandler: (() => void) | null = null;
 
   async connect(): Promise<void> {
-    if (this.connecting) return; // prevent duplicate connections
+    if (this.connecting) return;
     this.connecting = true;
+
+    // Cancel any pending reconnect
+    this.autoReconnect = false;
+    this.reconnecting = false;
+
     this.handlers.onStateChange('connecting');
     this.log('info', 'Requesting Bluetooth device...');
 
     try {
+      // Disconnect existing connection if any
+      if (this.server?.connected) {
+        try { this.server.disconnect(); } catch { /* */ }
+      }
+      this.cleanup();
+
       this.autoReconnect = true;
       this.reconnectCount = 0;
 
@@ -117,17 +129,22 @@ export class EcoFlowConnection {
       this.log('info', `Found device: ${this.device.name}`);
       this.identifyDevice();
 
-      this.device.addEventListener('gattserverdisconnected', () => {
-        if (this.reconnecting) return; // prevent duplicate reconnect
+      // Remove old disconnect handler if any, add fresh one
+      if (this.disconnectHandler) {
+        this.device.removeEventListener('gattserverdisconnected', this.disconnectHandler);
+      }
+      this.disconnectHandler = () => {
+        if (this.reconnecting) return;
         this.log('info', 'Device disconnected');
         this.cleanup();
         if (this.autoReconnect) {
           this.reconnecting = true;
-          setTimeout(() => { this.reconnecting = false; this.attemptReconnect(); }, 1000);
+          setTimeout(() => { this.reconnecting = false; this.attemptReconnect(); }, 2000);
         } else {
           this.handlers.onStateChange('disconnected');
         }
-      });
+      };
+      this.device.addEventListener('gattserverdisconnected', this.disconnectHandler);
 
       // Connect with retries
       this.log('info', 'Connecting to GATT server...');
@@ -474,18 +491,30 @@ export class EcoFlowConnection {
     }
   }
 
+  private boundNotificationHandler: ((event: Event) => void) | null = null;
+
   private async subscribeNotifications(): Promise<void> {
-    if (this.notifyChar) {
-      this.log('info', 'Subscribing to notifications...');
-      await this.notifyChar.startNotifications();
-      this.notifyChar.addEventListener('characteristicvaluechanged', this.onNotification.bind(this));
+    if (!this.notifyChar) return;
+
+    // Remove old listener if any to avoid duplicates
+    if (this.boundNotificationHandler) {
+      this.notifyChar.removeEventListener('characteristicvaluechanged', this.boundNotificationHandler);
     }
+
+    this.log('info', 'Subscribing to notifications...');
+    this.boundNotificationHandler = this.onNotification.bind(this);
+    await this.notifyChar.startNotifications();
+    this.notifyChar.addEventListener('characteristicvaluechanged', this.boundNotificationHandler);
   }
 
   async disconnect(): Promise<void> {
     this.autoReconnect = false;
+    this.reconnecting = false;
+    this.connecting = false;
     this.stopStatusPolling();
-    if (this.server?.connected) this.server.disconnect();
+    if (this.server?.connected) {
+      try { this.server.disconnect(); } catch { /* */ }
+    }
     this.cleanup();
     this.handlers.onStateChange('disconnected');
   }
@@ -502,7 +531,7 @@ export class EcoFlowConnection {
   }
 
   private async attemptReconnect(): Promise<void> {
-    if (!this.autoReconnect || !this.device) return;
+    if (!this.autoReconnect || !this.device || this.connecting) return;
     this.reconnectCount++;
     if (this.reconnectCount > 3) {
       this.log('error', 'Too many reconnects. Click Connect to retry.');
