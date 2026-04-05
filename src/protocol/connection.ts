@@ -292,32 +292,72 @@ export class EcoFlowConnection {
       return true;
     }
 
-    if (this.authState === 'auth_status_requested') {
-      // Parse the encrypted response
-      // This is now an EncPacket (0x5A5A) with our session key
-      // Just consume it and proceed to authentication
-      this.log('info', 'Auth status received, sending authentication...');
-      this.authState = 'auth_sent';
+    if (this.authState === 'auth_status_requested' || this.authState === 'auth_sent') {
+      // These responses arrive as encrypted 0x5A5A packets
+      // Buffer and try to parse as EncPacket
+      this.packetBuffer = concatBytes(this.packetBuffer, data);
 
-      // Step 4: Send authentication
-      const authPayload = generateAuthPayload(this.userId, this.serialNumber!);
-      this.log('info', `Auth payload: ${new TextDecoder().decode(authPayload)}`);
+      // Try to extract a complete 0x5A5A frame
+      const start = findEncPrefix(this.packetBuffer);
+      if (start < 0) return true;
+      if (start > 0) this.packetBuffer = this.packetBuffer.slice(start);
+      if (this.packetBuffer.length < 6) return true;
 
-      const authPkt = buildPacket(0x21, 0x35, 0x35, 0x86, authPayload, undefined);
-      await this.sendEncryptedRaw(authPkt);
+      const length = this.packetBuffer[4] | (this.packetBuffer[5] << 8);
+      const totalLen = 6 + length;
+      if (this.packetBuffer.length < totalLen) return true;
+
+      const frameData = this.packetBuffer.slice(0, totalLen);
+      this.packetBuffer = this.packetBuffer.slice(totalLen);
+
+      const enc = parseEncPacket(frameData);
+      if (!enc || !this.sessionKeys) {
+        this.log('error', 'Failed to parse auth response');
+        return true;
+      }
+
+      try {
+        const decrypted = await decryptAesCbc(enc.encryptedPayload, this.sessionKeys.aesKey, this.sessionKeys.iv);
+        const innerPkt = parsePacket(decrypted);
+        this.log('info', `Auth response decrypted: ${toHex(decrypted).substring(0, 80)}`);
+
+        if (this.authState === 'auth_status_requested') {
+          this.log('info', 'Auth status received, sending authentication...');
+          this.authState = 'auth_sent';
+
+          const authPayload = generateAuthPayload(this.userId, this.serialNumber!);
+          this.log('info', `Auth payload: ${new TextDecoder().decode(authPayload)}`);
+
+          const authPkt = buildPacket(0x21, 0x35, 0x35, 0x86, authPayload, undefined);
+          await this.sendEncryptedRaw(authPkt);
+          return true;
+        }
+
+        if (this.authState === 'auth_sent') {
+          // Check for auth error in response
+          if (innerPkt && innerPkt.cmdSet === 0x35 && innerPkt.cmdId === 0x86) {
+            // Check payload for error codes
+            if (innerPkt.payload.length > 0 && innerPkt.payload[0] !== 0x00) {
+              this.log('error', `Authentication failed! Response: ${toHex(innerPkt.payload)}`);
+              this.log('error', 'This likely means the User ID does not match the account paired to this device.');
+              this.authState = 'idle';
+              this.autoReconnect = false;
+              this.handlers.onStateChange('disconnected');
+              return true;
+            }
+          }
+
+          this.authState = 'authenticated';
+          this.handlers.onStateChange('connected');
+          this.log('info', 'Authentication completed! Listening for data...');
+          this.startStatusPolling();
+          setTimeout(() => this.requestStatus(), 500);
+          return false; // let remaining data flow to normal processing
+        }
+      } catch (e) {
+        this.log('error', `Auth response decrypt failed: ${e}`);
+      }
       return true;
-    }
-
-    if (this.authState === 'auth_sent') {
-      // Check if auth response indicates success
-      // The response is an encrypted packet; parse and check
-      this.log('info', 'Auth response received, checking...');
-      this.authState = 'authenticated';
-      this.handlers.onStateChange('connected');
-      this.log('info', 'Authentication completed! Listening for data...');
-      this.startStatusPolling();
-      // Don't return true — let the data flow to normal packet processing
-      return false;
     }
 
     return false;
@@ -609,4 +649,11 @@ export class EcoFlowConnection {
     this.log('tx', `Raw (${data.length}B)`, hexData);
     await this.writeBytes(data);
   }
+}
+
+function findEncPrefix(data: Uint8Array): number {
+  for (let i = 0; i < data.length - 1; i++) {
+    if (data[i] === 0x5a && data[i + 1] === 0x5a) return i;
+  }
+  return -1;
 }
