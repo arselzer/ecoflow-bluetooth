@@ -105,6 +105,7 @@ This caused inconsistent auth results that masked the real error.
 |-----|--------|-------|-----------|-------------|
 | 0x35 | 0x01 | 0x52 | device->app | RTC time request (send time sync back) |
 | 0x35 | 0x35 | 0x20 | device->app | Status/config (8B payload: `0102000000000000`) |
+| 0x35 | 0x35 | 0x84 | app->device | Unbind? (returns 0x00 with empty payload) |
 | 0x35 | 0x35 | 0x85 | app->device | Bind user |
 | 0x35 | 0x35 | 0x86 | app->device | Authenticate user |
 | 0x35 | 0x35 | 0x89 | app->device | Query auth status |
