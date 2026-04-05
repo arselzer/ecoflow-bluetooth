@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import type { ConnectionState } from '../protocol';
 
 defineProps<{
@@ -7,10 +8,17 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  connect: [];
+  connect: [userId: string];
   disconnect: [];
   clear: [];
 }>();
+
+const userId = ref(localStorage.getItem('ef-user-id') ?? '');
+
+function handleConnect() {
+  localStorage.setItem('ef-user-id', userId.value);
+  emit('connect', userId.value);
+}
 
 const stateLabels: Record<ConnectionState, string> = {
   disconnected: 'Disconnected',
@@ -36,8 +44,16 @@ const stateColors: Record<ConnectionState, string> = {
     </div>
     <div class="actions">
       <template v-if="state === 'disconnected'">
+        <div class="user-id-field">
+          <input
+            v-model="userId"
+            placeholder="EcoFlow User ID (optional)"
+            class="user-id-input"
+            title="Required for Type 7 devices (River 3, Delta 3). Get from EcoFlow app ef_uid cookie. Leave empty for Type 1 devices (River 2, Delta 2)."
+          />
+        </div>
         <button class="btn secondary" @click="emit('clear')">Clear</button>
-        <button class="btn primary" @click="emit('connect')">Connect</button>
+        <button class="btn primary" @click="handleConnect">Connect</button>
       </template>
       <template v-else>
         <button
@@ -131,5 +147,26 @@ const stateColors: Record<ConnectionState, string> = {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.user-id-field {
+  display: flex;
+  align-items: center;
+}
+
+.user-id-input {
+  padding: 6px 10px;
+  background: #2a2a3e;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-family: monospace;
+  font-size: 0.85em;
+  width: 200px;
+}
+
+.user-id-input:focus {
+  outline: none;
+  border-color: #3b82f6;
 }
 </style>

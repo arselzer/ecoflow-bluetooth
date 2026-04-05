@@ -76,8 +76,10 @@ export function buildEncPacket(
     writeUint16LE(length),
   );
 
-  const payloadCrc = crc16(encryptedPayload);
-  return concatBytes(header, encryptedPayload, writeUint16LE(payloadCrc));
+  // CRC16 covers header + payload (matches Python: crc16(data) before appending crc)
+  const headerPlusPayload = concatBytes(header, encryptedPayload);
+  const payloadCrc = crc16(headerPlusPayload);
+  return concatBytes(headerPlusPayload, writeUint16LE(payloadCrc));
 }
 
 // Parse an inner packet (0xAA prefix)
@@ -240,4 +242,75 @@ export function formatPacket(data: Uint8Array): string {
     }
   }
   return `[???] ${toHex(data).substring(0, 40)}...`;
+}
+
+// ============================================================
+// SimplePacketAssembler — for unencrypted EncPacket handshake frames
+// Used during ECDH key exchange (before encryption is established)
+// ============================================================
+
+export class SimplePacketAssembler {
+  private buffer: Uint8Array = new Uint8Array(0);
+
+  // Wrap raw payload in an unencrypted EncPacket command frame
+  static encode(payload: Uint8Array): Uint8Array {
+    return buildEncPacket(0x00, payload); // FRAME_TYPE_COMMAND = 0x00
+  }
+
+  // Parse one EncPacket frame from (possibly fragmented) BLE data
+  // Returns payload bytes or null if incomplete
+  parse(data: Uint8Array): Uint8Array | null {
+    if (this.buffer.length > 0) {
+      data = concatBytes(this.buffer, data);
+      this.buffer = new Uint8Array(0);
+    }
+
+    while (data.length > 0) {
+      // Find 0x5A5A prefix
+      const start = findPrefix(data, 0x5a, 0x5a);
+      if (start < 0) return null;
+      if (start > 0) data = data.slice(start);
+
+      if (data.length < 8) {
+        this.buffer = data;
+        return null;
+      }
+
+      const payloadLen = readUint16LE(data, 4);
+      const dataEnd = 6 + payloadLen;
+
+      if (dataEnd > data.length) {
+        // Check for false prefix
+        const next = findPrefix(data.slice(2), 0x5a, 0x5a);
+        if (next >= 0) {
+          data = data.slice(2 + next);
+          continue;
+        }
+        this.buffer = data;
+        return null;
+      }
+
+      const payloadData = data.slice(6, dataEnd - 2);
+      const payloadCrcBytes = data.slice(dataEnd - 2, dataEnd);
+      const expectedCrc = readUint16LE(payloadCrcBytes, 0);
+
+      // CRC16 over header + payload
+      const headerPlusPayload = concatBytes(data.slice(0, 6), payloadData);
+      if (crc16(headerPlusPayload) !== expectedCrc) {
+        data = data.slice(2);
+        continue;
+      }
+
+      return payloadData;
+    }
+
+    return null;
+  }
+}
+
+function findPrefix(data: Uint8Array, b0: number, b1: number): number {
+  for (let i = 0; i < data.length - 1; i++) {
+    if (data[i] === b0 && data[i + 1] === b1) return i;
+  }
+  return -1;
 }

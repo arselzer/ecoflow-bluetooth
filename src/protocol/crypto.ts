@@ -1,4 +1,7 @@
-import { toHex } from './utils';
+import { concatBytes } from './utils';
+import { get8bytes } from './keydata';
+import { curve as curveMod } from 'elliptic';
+import BN from 'bn.js';
 
 export interface SessionKeys {
   aesKey: Uint8Array;   // 16-byte AES-128-CBC key
@@ -6,26 +9,132 @@ export interface SessionKeys {
   sharedKey: Uint8Array;
 }
 
-// River 2 / Delta 2 Type 1 encryption: derive keys from serial number
-// Key = MD5(serial_number), IV = MD5(reversed_serial_number)
-export async function deriveType1Keys(serialNumber: string): Promise<SessionKeys> {
+// ============================================================
+// SECP160r1 Elliptic Curve (not in Web Crypto, use elliptic.js)
+// ============================================================
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const secp160r1Curve = new (curveMod.short as any)({
+  p: 'ffffffffffffffffffffffffffffffff7fffffff',
+  a: 'ffffffffffffffffffffffffffffffff7ffffffc',
+  b: '1c97befc54bd7a8b65acf89f81d4d4adc565fa45',
+  n: '0100000000000000000001f4c8f927aed3ca752257',
+  g: [
+    '4a96b5688ef573284664698968c38bb913cbfc82',
+    '23a628553168947d59dcc912042351377ac5fb32',
+  ],
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CurvePoint = any;
+
+export interface ECDHKeyPair {
+  privateKey: BN;
+  publicKey: CurvePoint;
+  publicKeyBytes: Uint8Array; // raw 40-byte public key (x || y, no 0x04 prefix)
+}
+
+// Generate an ECDH keypair on SECP160r1
+export function generateECDHKeyPair(): ECDHKeyPair {
+  // Generate random private key in range [1, n-1]
+  const n = secp160r1Curve.n!;
+  let privKey: BN;
+  do {
+    const randBytes = new Uint8Array(20);
+    crypto.getRandomValues(randBytes);
+    privKey = new BN(randBytes);
+    privKey = privKey.umod(n);
+  } while (privKey.isZero());
+
+  const pubPoint = secp160r1Curve.g.mul(privKey);
+  const xBytes = new Uint8Array(pubPoint.getX().toArray('be', 20));
+  const yBytes = new Uint8Array(pubPoint.getY().toArray('be', 20));
+  const publicKeyBytes = concatBytes(xBytes, yBytes);
+
+  return { privateKey: privKey, publicKey: pubPoint, publicKeyBytes };
+}
+
+// Compute ECDH shared secret from our private key and device's public key
+export function computeSharedSecret(
+  privateKey: BN,
+  devicePubKeyBytes: Uint8Array,
+): Uint8Array {
+  // Device public key is raw bytes (x || y) for SECP160r1
+  const keyLen = devicePubKeyBytes.length / 2;
+  const x = new BN(devicePubKeyBytes.slice(0, keyLen));
+  const y = new BN(devicePubKeyBytes.slice(keyLen));
+  const devicePubPoint = secp160r1Curve.point(x, y);
+
+  // Shared secret = privateKey * devicePubKey
+  const sharedPoint = devicePubPoint.mul(privateKey);
+  // Return the x-coordinate as the shared secret (standard ECDH)
+  return new Uint8Array(sharedPoint.getX().toArray('be', 20));
+}
+
+// Get ECDH key size from curve_num (returned by device)
+export function getEcdhTypeSize(curveNum: number): number {
+  switch (curveNum) {
+    case 1: return 52;
+    case 2: return 56;
+    case 3: case 4: return 64;
+    default: return 40;
+  }
+}
+
+// ============================================================
+// Type 1 encryption: River 2 / Delta 2
+// ============================================================
+
+export function deriveType1Keys(serialNumber: string): SessionKeys {
   const serialBytes = new TextEncoder().encode(serialNumber);
   const reversedBytes = new TextEncoder().encode(serialNumber.split('').reverse().join(''));
-
   const aesKey = md5Impl(serialBytes);
   const iv = md5Impl(reversedBytes);
-
   return { aesKey, iv, sharedKey: aesKey };
 }
 
-// MD5 implementation for key derivation
-// EcoFlow uses MD5 for session key generation and IV derivation
-async function md5(data: Uint8Array): Promise<Uint8Array> {
-  // Web Crypto doesn't support MD5 directly, so we implement it
-  return md5Impl(data);
+// ============================================================
+// Type 7 encryption: River 3 / Delta 3 / SHP2 / DPU
+// ============================================================
+
+// Step 1: After ECDH, derive initial encryption from shared key
+export function deriveType7InitialKeys(sharedSecret: Uint8Array): SessionKeys {
+  const iv = md5Impl(sharedSecret);
+  return { aesKey: sharedSecret.slice(0, 16), iv, sharedKey: sharedSecret };
 }
 
-function md5Impl(message: Uint8Array): Uint8Array {
+// Step 2: Generate final session key from seed + srand + keydata
+// Mirrors rabits/ha-ef-ble genSessionKey()
+export function generateType7SessionKey(seed: Uint8Array, srand: Uint8Array): Uint8Array {
+  // seed is 2 bytes, srand is 16 bytes
+  // pos = seed[0] * 0x10 + ((seed[1] - 1) & 0xFF) * 0x100
+  const pos = seed[0] * 0x10 + ((seed[1] - 1) & 0xff) * 0x100;
+
+  // Get 16 bytes from keydata at computed position
+  const keyBytes0 = get8bytes(pos);
+  const keyBytes1 = get8bytes(pos + 8);
+
+  // Combine: 16 bytes from keydata + 16 bytes from srand
+  const combined = concatBytes(keyBytes0, keyBytes1, srand.slice(0, 8), srand.slice(8, 16));
+
+  return md5Impl(combined);
+}
+
+// Step 3: Generate authentication payload
+// auth = MD5(user_id + device_sn) as uppercase hex ASCII
+export function generateAuthPayload(userId: string, deviceSn: string): Uint8Array {
+  const input = new TextEncoder().encode(userId + deviceSn);
+  const hash = md5Impl(input);
+  // Convert to uppercase hex string, then to ASCII bytes
+  const hexStr = Array.from(hash).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join('');
+  return new TextEncoder().encode(hexStr);
+}
+
+// ============================================================
+// MD5 implementation (needed because Web Crypto doesn't support MD5)
+// ============================================================
+
+export function md5Impl(message: Uint8Array): Uint8Array {
   const s = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
     5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
@@ -54,16 +163,13 @@ function md5Impl(message: Uint8Array): Uint8Array {
 
   const origLen = message.length;
   const bitLen = origLen * 8;
-
-  // Pre-processing: adding padding bits
   const paddedLen = ((origLen + 8) >>> 6) * 64 + 64;
   const padded = new Uint8Array(paddedLen);
   padded.set(message);
   padded[origLen] = 0x80;
-  // Append original length in bits as 64-bit LE
   const view = new DataView(padded.buffer);
   view.setUint32(paddedLen - 8, bitLen >>> 0, true);
-  view.setUint32(paddedLen - 4, 0, true); // upper 32 bits of length (0 for messages < 512MB)
+  view.setUint32(paddedLen - 4, 0, true);
 
   for (let offset = 0; offset < paddedLen; offset += 64) {
     const M = new Uint32Array(16);
@@ -88,7 +194,6 @@ function md5Impl(message: Uint8Array): Uint8Array {
         F = (C ^ (B | ~D)) >>> 0;
         g = (7 * i) % 16;
       }
-
       F = (F + A + K[i] + M[g]) >>> 0;
       A = D;
       D = C;
@@ -111,28 +216,11 @@ function md5Impl(message: Uint8Array): Uint8Array {
   return result;
 }
 
-// Derive IV from shared key: IV = MD5(shared_key)
-export async function deriveIV(sharedKey: Uint8Array): Promise<Uint8Array> {
-  return await md5(sharedKey);
-}
+// ============================================================
+// AES-128-CBC encryption/decryption
+// ============================================================
 
-// Generate session key from login_key seed and srand
-// session_key = MD5(login_key[seed] + srand)
-export async function generateSessionKey(loginKeyEntry: Uint8Array, srand: Uint8Array): Promise<Uint8Array> {
-  const combined = new Uint8Array(loginKeyEntry.length + srand.length);
-  combined.set(loginKeyEntry);
-  combined.set(srand, loginKeyEntry.length);
-  return await md5(combined);
-}
-
-// Generate authentication hash: MD5(user_id + serial_number) as ASCII hex
-export async function generateAuthHash(userId: string, serialNumber: string): Promise<string> {
-  const input = new TextEncoder().encode(userId + serialNumber);
-  const hash = await md5(input);
-  return toHex(hash);
-}
-
-// AES-128-CBC encryption
+// Type 7: PKCS7 padding
 export async function encryptAesCbc(
   data: Uint8Array,
   key: Uint8Array,
@@ -149,36 +237,50 @@ export async function encryptAesCbc(
   return new Uint8Array(encrypted);
 }
 
-// AES-128-CBC decryption
+// Type 7: decrypt with PKCS7 unpadding, aligned to block boundary
 export async function decryptAesCbc(
   data: Uint8Array,
   key: Uint8Array,
   iv: Uint8Array,
 ): Promise<Uint8Array> {
+  // Align to AES block boundary (firmware behavior)
+  const blockSize = 16;
+  const aligned = data.length - (data.length % blockSize);
+  if (aligned === 0) return data;
+
   const cryptoKey = await crypto.subtle.importKey(
     'raw', key, { name: 'AES-CBC' }, false, ['decrypt'],
   );
+  const toDecrypt = data.slice(0, aligned);
+
   try {
+    // Try with PKCS7 unpadding (Web Crypto default)
     const decrypted = await crypto.subtle.decrypt(
       { name: 'AES-CBC', iv },
       cryptoKey,
-      data,
+      toDecrypt,
     );
     return new Uint8Array(decrypted);
   } catch {
-    // If standard PKCS7 padding fails, try manual block alignment
-    const blockSize = 16;
-    if (data.length % blockSize !== 0) {
-      const paddedLen = Math.ceil(data.length / blockSize) * blockSize;
-      const padded = new Uint8Array(paddedLen);
-      padded.set(data);
+    // If PKCS7 unpadding fails, decrypt raw and return as-is
+    // This happens with Type 1 null-padded data
+    try {
+      // Add a fake PKCS7 block to allow decryption without padding check
+      const padded = new Uint8Array(toDecrypt.length + blockSize);
+      padded.set(toDecrypt);
+      // Fill last block with 0x10 (valid PKCS7 for a full-block pad)
+      for (let i = toDecrypt.length; i < padded.length; i++) {
+        padded[i] = blockSize;
+      }
       const decrypted = await crypto.subtle.decrypt(
         { name: 'AES-CBC', iv },
         cryptoKey,
         padded,
       );
-      return new Uint8Array(decrypted);
+      // Return only the original data length (minus the fake padding)
+      return new Uint8Array(decrypted).slice(0, toDecrypt.length);
+    } catch {
+      throw new Error('AES-CBC decryption failed');
     }
-    throw new Error('AES-CBC decryption failed');
   }
 }
