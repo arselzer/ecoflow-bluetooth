@@ -16,6 +16,8 @@ const logEntries = ref<LogEntry[]>([]);
 const rawPackets = ref<{ timestamp: number; direction: 'tx' | 'rx'; data: Uint8Array }[]>([]);
 const activeTab = ref<'telemetry' | 'commands' | 'scanner' | 'log' | 'raw'>('telemetry');
 const webBluetoothSupported = ref(true);
+const currentUserId = ref('');
+const currentSerial = ref('');
 let wakeLock: WakeLockSentinel | null = null;
 
 const connection = new EcoFlowConnection({
@@ -98,6 +100,8 @@ function releaseWakeLock() {
 async function handleConnect(userId: string, serialOverride: string) {
   try {
     const effectiveUserId = userId || '0000000000000000';
+    currentUserId.value = effectiveUserId;
+    currentSerial.value = serialOverride;
     connection.setUserId(effectiveUserId);
     if (serialOverride) {
       connection.setSerialOverride(serialOverride);
@@ -193,6 +197,8 @@ const tabs = [
         v-if="activeTab === 'commands'"
         :connected="connectionState === 'connected'"
         :device-name="deviceName"
+        :user-id="currentUserId"
+        :serial-number="currentSerial"
         @command="handleCommand"
         @raw-bytes="handleRawBytes"
       />

@@ -1,16 +1,32 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { RIVER2_COMMANDS, fromHex } from '../protocol';
+import { RIVER2_COMMANDS, fromHex, generateAuthPayload } from '../protocol';
 
-defineProps<{
+const props = defineProps<{
   connected: boolean;
   deviceName: string | null;
+  userId: string;
+  serialNumber: string;
 }>();
 
 const emit = defineEmits<{
   command: [src: number, dst: number, cmdSet: number, cmdId: number, payload: Uint8Array];
   rawBytes: [hex: string];
 }>();
+
+// Try to bind via 0x35:85 with auth hash payload
+function tryBind() {
+  const uid = props.userId || '0000000000000000';
+  const sn = props.serialNumber || 'unknown';
+  const payload = generateAuthPayload(uid, sn);
+  console.log('Bind attempt: uid=' + uid + ' sn=' + sn + ' payload=' + new TextDecoder().decode(payload));
+  emit('command', 0x21, 0x35, 0x35, 0x85, payload);
+}
+
+// Query bind status (0x35:85 with empty payload)
+function queryBindStatus() {
+  emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Array(0));
+}
 
 // Custom command fields
 const customSrc = ref('20');
@@ -60,6 +76,15 @@ function sendRawHex() {
         Commands are based on reverse-engineered protocol (rabits/ha-ef-ble).
         AC/DC toggles verified on River 2 series. Other devices may differ.
         Use with caution — some commands could affect device operation.
+      </div>
+
+      <div class="section">
+        <h4>Bind / Auth (experimental)</h4>
+        <p class="hint">0x35:85 responded during scanning — might be the bind command.</p>
+        <div class="button-grid">
+          <button class="cmd-btn bind" @click="queryBindStatus">Query 0x35:85 (empty)</button>
+          <button class="cmd-btn bind" @click="tryBind">Try Bind 0x35:85 (with auth hash)</button>
+        </div>
       </div>
 
       <div class="section">
@@ -226,6 +251,17 @@ h4 {
   border-color: #3b82f6;
   color: white;
   align-self: flex-end;
+}
+
+.cmd-btn.bind {
+  border-color: #a855f7;
+  color: #a855f7;
+}
+
+.hint {
+  color: #666;
+  font-size: 0.8em;
+  margin: 0 0 8px 0;
 }
 
 .cmd-btn.send:hover {
