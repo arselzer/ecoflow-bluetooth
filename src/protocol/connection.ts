@@ -82,7 +82,11 @@ export class EcoFlowConnection {
     this.handlers.onLog({ timestamp: Date.now(), direction, message, data });
   }
 
+  private connecting = false;
+
   async connect(): Promise<void> {
+    if (this.connecting) return; // prevent duplicate connections
+    this.connecting = true;
     this.handlers.onStateChange('connecting');
     this.log('info', 'Requesting Bluetooth device...');
 
@@ -156,6 +160,8 @@ export class EcoFlowConnection {
       this.log('error', `Connection failed: ${error}`);
       this.handlers.onStateChange('disconnected');
       throw error;
+    } finally {
+      this.connecting = false;
     }
   }
 
@@ -364,8 +370,9 @@ export class EcoFlowConnection {
           this.authState = 'authenticated';
           this.handlers.onStateChange('connected');
           this.log('info', 'Authentication completed! Listening for data...');
+          // Send UTC time sync — device expects this after auth to start sending data
+          setTimeout(() => this.sendTimeSync(), 200);
           this.startStatusPolling();
-          setTimeout(() => this.requestStatus(), 500);
           return false; // let remaining data flow to normal processing
         }
       } catch (e) {
@@ -476,7 +483,7 @@ export class EcoFlowConnection {
     this.stopStatusPolling();
     this.statusPollTimer = setInterval(() => {
       if (this.writeChar && this.isAuthenticated) this.requestStatus();
-    }, 10000);
+    }, 5000);
   }
 
   private stopStatusPolling() {
@@ -651,6 +658,18 @@ export class EcoFlowConnection {
     await this.sendRawCommand(SRC_APP, DST_DEVICE, 0x02, 0x01, new Uint8Array(0));
   }
 
+  // Send UTC time sync — device expects this after auth
+  // Python ref: SysUTCSync protobuf with sys_utc_time field
+  // Simple protobuf: field 1 (varint) = unix timestamp in seconds
+  private async sendTimeSync(): Promise<void> {
+    this.log('info', 'Sending UTC time sync...');
+    const now = Math.floor(Date.now() / 1000);
+    // Encode as protobuf varint: field 1 (tag=0x08), then varint value
+    const payload = encodeProtobufVarint(1, now);
+    // Python sends: src=0x21, dst=0x01, cmdSet=0x01, cmdId=0x55
+    await this.sendRawCommand(0x21, DST_DEVICE, 0x01, 0x55, payload);
+  }
+
   private async writeBytes(data: Uint8Array): Promise<void> {
     if (!this.writeChar) return;
     this.handlers.onRawPacket('tx', data);
@@ -700,4 +719,19 @@ function findEncPrefix(data: Uint8Array): number {
     if (data[i] === 0x5a && data[i + 1] === 0x5a) return i;
   }
   return -1;
+}
+
+// Encode a protobuf field (varint type) — field_number + varint value
+function encodeProtobufVarint(fieldNumber: number, value: number): Uint8Array {
+  const tag = (fieldNumber << 3) | 0; // wire type 0 = varint
+  const bytes: number[] = [];
+  // Encode tag
+  let t = tag;
+  while (t > 0x7f) { bytes.push((t & 0x7f) | 0x80); t >>>= 7; }
+  bytes.push(t & 0x7f);
+  // Encode value
+  let v = value;
+  while (v > 0x7f) { bytes.push((v & 0x7f) | 0x80); v >>>= 7; }
+  bytes.push(v & 0x7f);
+  return new Uint8Array(bytes);
 }
