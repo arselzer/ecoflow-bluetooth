@@ -19,7 +19,6 @@ function tryBind() {
   const uid = props.userId || '0000000000000000';
   const sn = props.serialNumber || 'unknown';
   const payload = generateAuthPayload(uid, sn);
-  console.log('Bind attempt: uid=' + uid + ' sn=' + sn + ' payload=' + new TextDecoder().decode(payload));
   emit('command', 0x21, 0x35, 0x35, 0x85, payload);
 }
 
@@ -27,6 +26,17 @@ function tryBind() {
 function queryBindStatus() {
   emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Array(0));
 }
+
+// Try unbind candidates
+function tryUnbind84empty() { emit('command', 0x21, 0x35, 0x35, 0x84, new Uint8Array(0)); }
+function tryUnbind84hash() {
+  const uid = props.userId || '0000000000000000';
+  const sn = props.serialNumber || 'unknown';
+  emit('command', 0x21, 0x35, 0x35, 0x84, generateAuthPayload(uid, sn));
+}
+function tryUnbind85zero() { emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Array([0x00])); }
+function tryUnbind87empty() { emit('command', 0x21, 0x35, 0x35, 0x87, new Uint8Array(0)); }
+function tryUnbind88empty() { emit('command', 0x21, 0x35, 0x35, 0x88, new Uint8Array(0)); }
 
 // Custom command fields
 const customSrc = ref('20');
@@ -86,8 +96,17 @@ function sendRawHex() {
           you can use these controls. Factory reset on the device should also clear bindings.
         </p>
         <div class="button-grid">
-          <button class="cmd-btn bind" @click="queryBindStatus">Query Bind Status</button>
-          <button class="cmd-btn bind" @click="tryBind">Bind (0x35:85)</button>
+          <button class="cmd-btn bind" @click="queryBindStatus">Query Status (85 empty)</button>
+          <button class="cmd-btn bind" @click="tryBind">Bind (85 + hash)</button>
+        </div>
+        <h4>Unbind Discovery</h4>
+        <p class="hint">Try nearby cmdIds to find an unbind command. Check Log tab for responses.</p>
+        <div class="button-grid">
+          <button class="cmd-btn unbind" @click="tryUnbind84empty">84 empty</button>
+          <button class="cmd-btn unbind" @click="tryUnbind84hash">84 + hash</button>
+          <button class="cmd-btn unbind" @click="tryUnbind85zero">85 + 0x00</button>
+          <button class="cmd-btn unbind" @click="tryUnbind87empty">87 empty</button>
+          <button class="cmd-btn unbind" @click="tryUnbind88empty">88 empty</button>
         </div>
       </div>
 
@@ -260,6 +279,11 @@ h4 {
 .cmd-btn.bind {
   border-color: #a855f7;
   color: #a855f7;
+}
+
+.cmd-btn.unbind {
+  border-color: #f59e0b;
+  color: #f59e0b;
 }
 
 .hint {
