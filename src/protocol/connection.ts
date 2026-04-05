@@ -1,7 +1,7 @@
 import {
   UUID_WRITE, UUID_NOTIFY, UUID_NUS_WRITE, UUID_NUS_NOTIFY,
   MANUFACTURER_ID, BLE_NAME_PREFIXES, DEVICE_PREFIXES, BLE_NAME_MAP,
-  TYPE1_PREFIXES, FRAME_TYPE_COMMAND, SRC_APP, DST_DEVICE,
+  TYPE1_PREFIXES, FRAME_TYPE_PROTOCOL, SRC_APP, DST_DEVICE,
 } from './constants';
 import {
   deriveType1Keys, encryptAesCbc, decryptAesCbc,
@@ -623,7 +623,7 @@ export class EcoFlowConnection {
   private async sendEncryptedRaw(innerPacket: Uint8Array): Promise<void> {
     if (!this.sessionKeys) return;
     const encrypted = await encryptAesCbc(innerPacket, this.sessionKeys.aesKey, this.sessionKeys.iv);
-    const encPacket = buildEncPacket(FRAME_TYPE_COMMAND, encrypted);
+    const encPacket = buildEncPacket(FRAME_TYPE_PROTOCOL, encrypted);
     this.log('tx', `[ENC] ${encPacket.length}B`, toHex(encPacket).substring(0, 80));
     await this.writeBytes(encPacket);
   }
