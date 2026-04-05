@@ -89,6 +89,104 @@ function selectFields(src: number, _cmdSet: number, cmdId: number): StructField[
   return null;
 }
 
+// River 3 protobuf field mapping (cmd=fe:15)
+// Discovered via live device capture from River 3 Plus
+const RIVER3_PROTO_FIELDS: Record<number, { name: string; unit?: string; type?: 'float' }> = {
+  1: { name: 'sys_status' },
+  8: { name: 'soc', unit: '%' },
+  17: { name: 'full_cap_mins', unit: 'min' },
+  18: { name: 'remain_mins_1', unit: 'min' },
+  19: { name: 'remain_mins_2', unit: 'min' },
+  22: { name: 'watts_out_sum', unit: 'W' },
+  23: { name: 'output_count' },
+  25: { name: 'ac_enabled' },
+  37: { name: 'watts_in_sum', unit: 'W' },
+  158: { name: 'power_factor', type: 'float' },
+  195: { name: 'dc_enabled' },
+  211: { name: 'lcd_soc', unit: '%' },
+  212: { name: 'charge_watts', unit: 'W' },
+  227: { name: 'bms_cycles' },
+  242: { name: 'temperature', unit: '\u00b0C', type: 'float' },
+  243: { name: 'max_charge_soc', type: 'float' },
+  248: { name: 'full_cap_wh', unit: 'Wh' },
+  254: { name: 'total_out_kwh' },
+  255: { name: 'total_in_kwh' },
+  258: { name: 'temp_sensor_1', unit: '\u00b0C' },
+  259: { name: 'temp_sensor_2', unit: '\u00b0C' },
+  260: { name: 'temp_sensor_3', unit: '\u00b0C' },
+  261: { name: 'temp_sensor_4', unit: '\u00b0C' },
+  262: { name: 'inv_temperature', unit: '\u00b0C', type: 'float' },
+  263: { name: 'bms_soh', type: 'float' },
+  268: { name: 'total_out_kwh_2' },
+  269: { name: 'total_in_kwh_2' },
+  270: { name: 'charge_limit', unit: '%' },
+  271: { name: 'discharge_limit', unit: '%' },
+  359: { name: 'solar_watts', unit: 'W' },
+};
+
+// Parse protobuf telemetry (River 3 fe:15 packets)
+function parseProtobufTelemetry(payload: Uint8Array): { data: TelemetryData; fields: ParsedField[] } {
+  const telemetry: TelemetryData = {};
+  const parsed: ParsedField[] = [];
+  let offset = 0;
+
+  while (offset < payload.length) {
+    const startOff = offset;
+    // Decode tag
+    let tag = 0, shift = 0;
+    while (offset < payload.length) {
+      const b = payload[offset++];
+      tag |= (b & 0x7f) << shift;
+      shift += 7;
+      if (!(b & 0x80)) break;
+    }
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 7;
+
+    if (wireType === 0) { // varint
+      let val = 0; shift = 0;
+      while (offset < payload.length) {
+        const b = payload[offset++];
+        val |= (b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80)) break;
+      }
+      const def = RIVER3_PROTO_FIELDS[fieldNum];
+      if (def) {
+        telemetry[def.name] = val;
+        parsed.push({ name: def.name, offset: startOff, size: offset - startOff, rawHex: toHex(payload.slice(startOff, offset)), value: val, unit: def.unit });
+      }
+    } else if (wireType === 5) { // 32-bit
+      if (offset + 4 > payload.length) break;
+      const view = new DataView(payload.buffer, payload.byteOffset + offset, 4);
+      const fv = view.getFloat32(0, true);
+      const uv = view.getUint32(0, true);
+      offset += 4;
+      const def = RIVER3_PROTO_FIELDS[fieldNum];
+      if (def) {
+        const val = def.type === 'float' ? Math.round(fv * 100) / 100 : uv;
+        telemetry[def.name] = val;
+        parsed.push({ name: def.name, offset: startOff, size: offset - startOff, rawHex: toHex(payload.slice(startOff, offset)), value: val, unit: def.unit });
+      }
+    } else if (wireType === 2) { // length-delimited - skip
+      let len = 0; shift = 0;
+      while (offset < payload.length) {
+        const b = payload[offset++];
+        len |= (b & 0x7f) << shift;
+        shift += 7;
+        if (!(b & 0x80)) break;
+      }
+      offset += len;
+    } else if (wireType === 1) { // 64-bit - skip
+      offset += 8;
+    } else {
+      break;
+    }
+  }
+
+  return { data: telemetry, fields: parsed };
+}
+
 // Parse telemetry from a decoded inner packet
 export function parseTelemetryDetailed(
   payload: Uint8Array,
@@ -96,10 +194,14 @@ export function parseTelemetryDetailed(
   cmdSet: number,
   cmdId: number,
 ): { data: TelemetryData; fields: ParsedField[] } {
+  // River 3 protobuf telemetry (cmd=fe:15)
+  if (cmdSet === 0xfe && cmdId === 0x15) {
+    return parseProtobufTelemetry(payload);
+  }
+
   const structFields = selectFields(src, cmdSet, cmdId);
 
   if (!structFields) {
-    // Unknown message type — return raw hex dump
     return {
       data: {},
       fields: [{
