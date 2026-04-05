@@ -95,12 +95,13 @@ function releaseWakeLock() {
   }
 }
 
-async function handleConnect(userId: string) {
+async function handleConnect(userId: string, serialOverride: string) {
   try {
-    // Set user ID for Type 7 auth. If empty, use a fixed default.
-    // Using a consistent default avoids registering random IDs on the device.
     const effectiveUserId = userId || '0000000000000000';
     connection.setUserId(effectiveUserId);
+    if (serialOverride) {
+      connection.setSerialOverride(serialOverride);
+    }
     await connection.connect();
     deviceName.value = connection.deviceName;
   } catch (e) {

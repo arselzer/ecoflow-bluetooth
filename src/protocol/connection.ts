@@ -55,6 +55,7 @@ export class EcoFlowConnection {
   private ecdhKeyPair: ECDHKeyPair | null = null;
   private simpleAssembler = new SimplePacketAssembler();
   private userId: string = '';
+  private serialOverride: string = '';
 
   private handlers: ConnectionEventHandler;
 
@@ -76,6 +77,10 @@ export class EcoFlowConnection {
 
   setUserId(userId: string) {
     this.userId = userId;
+  }
+
+  setSerialOverride(serial: string) {
+    this.serialOverride = serial;
   }
 
   private log(direction: LogEntry['direction'], message: string, data?: string) {
@@ -418,6 +423,12 @@ export class EcoFlowConnection {
 
     if (model === 'Unknown' && suffix) {
       this.serialNumber = suffix;
+    }
+
+    // Use serial override if provided (BLE name is truncated, auth needs full serial)
+    if (this.serialOverride) {
+      this.log('info', `Using manual serial override: ${this.serialOverride} (BLE name was: ${this.serialNumber})`);
+      this.serialNumber = this.serialOverride;
     }
 
     this.log('info', `Device: ${name}, Model: ${model}, Serial: ${this.serialNumber ?? 'unknown'}, Encryption: Type ${this.encryptionType}`);

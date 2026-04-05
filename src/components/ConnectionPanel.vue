@@ -8,16 +8,18 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  connect: [userId: string];
+  connect: [userId: string, serialOverride: string];
   disconnect: [];
   clear: [];
 }>();
 
 const userId = ref(localStorage.getItem('ef-user-id') ?? '');
+const serialOverride = ref(localStorage.getItem('ef-serial') ?? '');
 
 function handleConnect() {
   localStorage.setItem('ef-user-id', userId.value);
-  emit('connect', userId.value);
+  localStorage.setItem('ef-serial', serialOverride.value);
+  emit('connect', userId.value, serialOverride.value);
 }
 
 const stateLabels: Record<ConnectionState, string> = {
@@ -59,12 +61,18 @@ const stateColors: Record<ConnectionState, string> = {
         </template>
       </div>
     </div>
-    <div v-if="state === 'disconnected'" class="user-id-row">
+    <div v-if="state === 'disconnected'" class="settings-row">
+      <input
+        v-model="serialOverride"
+        placeholder="Device Serial (from sticker, e.g. R653...)"
+        class="settings-input"
+        title="Full 16-char serial from device sticker. BLE name is truncated — auth needs the real serial."
+      />
       <input
         v-model="userId"
-        placeholder="EcoFlow User ID (optional — needed for River 3, Delta 3)"
-        class="user-id-input"
-        title="Get from EcoFlow app ef_uid cookie or API login. Leave empty to try default."
+        placeholder="EcoFlow User ID (optional)"
+        class="settings-input"
+        title="Get from EcoFlow app ef_uid cookie. Leave empty to try default."
       />
     </div>
   </div>
@@ -84,8 +92,10 @@ const stateColors: Record<ConnectionState, string> = {
   align-items: center;
 }
 
-.user-id-row {
+.settings-row {
   margin-top: 8px;
+  display: flex;
+  gap: 8px;
 }
 
 .status {
@@ -158,7 +168,7 @@ const stateColors: Record<ConnectionState, string> = {
   cursor: not-allowed;
 }
 
-.user-id-input {
+.settings-input {
   padding: 6px 10px;
   background: #2a2a3e;
   border: 1px solid #444;
@@ -166,10 +176,11 @@ const stateColors: Record<ConnectionState, string> = {
   color: #e0e0e0;
   font-family: monospace;
   font-size: 0.85em;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
 }
 
-.user-id-input:focus {
+.settings-input:focus {
   outline: none;
   border-color: #3b82f6;
 }
