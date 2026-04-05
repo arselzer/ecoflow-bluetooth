@@ -99,7 +99,7 @@ export function buildEncPacket(
 // Python ref: Packet.fromBytes() in rabits/ha-ef-ble
 // Header: [0xAA][version][payload_length_LE][CRC8]
 // payload_length = length of just the command payload
-export function parsePacket(data: Uint8Array): EcoFlowPacket | null {
+export function parsePacket(data: Uint8Array, xorPayload: boolean = false): EcoFlowPacket | null {
   if (data.length < 10) return null;
   if (data[0] !== PACKET_PREFIX) return null;
 
@@ -149,12 +149,15 @@ export function parsePacket(data: Uint8Array): EcoFlowPacket | null {
 
   let payload = data.slice(payloadStart, payloadStart + payloadLength);
 
-  // Undo XOR obfuscation
-  const seqByte0 = seq & 0xff;
-  if (seqByte0 !== 0 && payload.length > 0) {
-    payload = new Uint8Array(payload);
-    for (let i = 0; i < payload.length; i++) {
-      payload[i] ^= seqByte0;
+  // XOR deobfuscation — only for unencrypted raw BLE packets
+  // Encrypted packets (from EncPacket/0x5A5A) should NOT be XORed
+  if (xorPayload) {
+    const seqByte0 = seq & 0xff;
+    if (seqByte0 !== 0 && payload.length > 0) {
+      payload = new Uint8Array(payload);
+      for (let i = 0; i < payload.length; i++) {
+        payload[i] ^= seqByte0;
+      }
     }
   }
 
