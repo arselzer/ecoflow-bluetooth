@@ -31,6 +31,7 @@ type AuthState =
   | 'ecdh_pubkey_received'
   | 'session_key_requested'
   | 'session_key_received'
+  | 'bind_sent'
   | 'auth_status_requested'
   | 'auth_sent'
   | 'authenticated';
@@ -315,15 +316,17 @@ export class EcoFlowConnection {
       this.sessionKeys = { aesKey: finalSessionKey, iv: this.sessionKeys!.iv, sharedKey: finalSessionKey };
       this.authState = 'session_key_received';
 
-      // Step 3: Query auth status
-      this.log('info', 'Querying auth status...');
-      const authStatusPkt = buildPacket(0x21, 0x35, 0x35, 0x89, new Uint8Array(0), undefined);
-      await this.sendEncryptedRaw(authStatusPkt);
-      this.authState = 'auth_status_requested';
+      // Step 3: Bind user to device (0x35:85) — discovered via scanning!
+      // This registers MD5(userId+serial) on the device. Required for unbound devices.
+      this.log('info', 'Sending bind request (0x35:85)...');
+      const bindPayload = generateAuthPayload(this.userId, this.serialNumber!);
+      const bindPkt = buildPacket(0x21, 0x35, 0x35, 0x85, bindPayload, undefined);
+      await this.sendEncryptedRaw(bindPkt);
+      this.authState = 'bind_sent';
       return true;
     }
 
-    if (this.authState === 'auth_status_requested' || this.authState === 'auth_sent') {
+    if (this.authState === 'bind_sent' || this.authState === 'auth_status_requested' || this.authState === 'auth_sent') {
       // These responses arrive as encrypted 0x5A5A packets
       // Buffer and try to parse as EncPacket
       this.packetBuffer = concatBytes(this.packetBuffer, data);
@@ -351,6 +354,18 @@ export class EcoFlowConnection {
         const decrypted = await decryptAesCbc(enc.encryptedPayload, this.sessionKeys.aesKey, this.sessionKeys.iv);
         const innerPkt = parsePacket(decrypted);
         this.log('info', `Auth response decrypted: ${toHex(decrypted).substring(0, 80)}`);
+
+        if (this.authState === 'bind_sent') {
+          const bindResult = innerPkt?.payload.length ? innerPkt.payload[0] : -1;
+          this.log('info', `Bind response: 0x${bindResult.toString(16)} (${bindResult === 0 ? 'success' : 'code ' + bindResult})`);
+
+          // Proceed to auth status query regardless of bind result
+          this.log('info', 'Querying auth status...');
+          const authStatusPkt = buildPacket(0x21, 0x35, 0x35, 0x89, new Uint8Array(0), undefined);
+          await this.sendEncryptedRaw(authStatusPkt);
+          this.authState = 'auth_status_requested';
+          return true;
+        }
 
         if (this.authState === 'auth_status_requested') {
           this.log('info', 'Auth status received, sending authentication...');
