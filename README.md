@@ -6,38 +6,50 @@ Built with Vue 3 + TypeScript + Vite, using the Web Bluetooth API.
 
 ## Supported Devices
 
-The protocol implementation targets EcoFlow devices that communicate via BLE:
+EcoFlow devices use two encryption schemes over BLE. The encryption type determines what level of local control is possible:
 
 **Type 1 encryption (fully supported — key derived from serial number):**
-- **River 2** (R601, R603)
-- **River 2 Max** (R611, R613)
-- **River 2 Pro** (R621, R623)
-- **Delta 2** (DAEB)
-- **Delta 2 Max** (DAEC)
+- **River 2** (serial: R601/R603, BLE name: EF-R2...)
+- **River 2 Max** (serial: R611/R613, BLE name: EF-R2M...)
+- **River 2 Pro** (serial: R621/R623, BLE name: EF-R2P...)
+- **Delta 2** (serial: DAEB, BLE name: EF-D2...)
+- **Delta 2 Max** (serial: DAEC, BLE name: EF-D2M...)
 
-**Type 7 encryption (discovery/monitoring — full control requires login_key.bin):**
-- **River 3 series** (R651, R653, R654, R655)
-- **Delta 3 series** (P331, P351)
-- **Delta Pro 3** (MR51)
-- **Smart Home Panel 2** (HD31)
-- **Delta Pro Ultra** (Y711)
+**Type 7 encryption (connection only — full control requires login_key.bin):**
+- **River 3** (serial: R651, BLE name: EF-R3...)
+- **River 3 Plus** (serial: R653, BLE name: EF-R3P...)
+- **River 3 Max** (serial: R654, BLE name: EF-R3M...)
+- **Delta 3 / Delta 3 Plus** (serial: P331/P351, BLE name: EF-D3...)
+- **Delta Pro 3** (serial: MR51, BLE name: EF-DP3...)
+- **Smart Home Panel 2** (serial: HD31, BLE name: EF-HD3...)
+- **Delta Pro Ultra** (serial: Y711, BLE name: EF-Y7...)
 
-> **Note:** This is based on community reverse-engineering efforts (primarily [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble)). River 2 and Delta 2 use Type 1 encryption where the session key is derived from the serial number alone. Newer devices (River 3, Delta 3, etc.) use Type 7 ECDH encryption which requires a `login_key.bin` file extracted from the EcoFlow app.
+> **Note:** This is based on community reverse-engineering efforts (primarily [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble)). Type 1 devices derive the session key from the serial number alone — no cloud account needed. Type 7 devices use ECDH key exchange and require a `login_key.bin` extracted from the EcoFlow Android APK plus your EcoFlow user ID. Without authentication, Type 7 devices disconnect after ~10 seconds.
 
 ## Features
 
-- **Device Discovery** — Scan for EcoFlow BLE devices by name prefix and manufacturer data
-- **Real-time Telemetry** — Decode battery status, power I/O, temperatures, and more
-- **Command Interface** — Send heartbeat requests, toggle AC/DC output
-- **Command Scanner** — Systematically scan command ranges to discover device capabilities
-- **Protocol Logger** — Full packet-level logging for reverse engineering
+- **Device Discovery** — Scan for EcoFlow BLE devices by manufacturer ID (0xB5B5) and name prefix
+- **Automatic Identification** — Detects device model and encryption type from BLE name (e.g., EF-R3P50256 = River 3 Plus, Type 7)
+- **Type 1 Encryption** — Automatic key derivation for River 2 / Delta 2 devices
+- **Real-time Telemetry** — Decode battery status, power I/O, temperatures via binary struct parsing
+- **Command Interface** — River 2 commands: AC/DC toggle, X-Boost, charge limits, charge speed, quiet mode
+- **Command Scanner** — Systematically scan cmdSet:cmdId ranges to discover device capabilities
+- **Protocol Logger** — Full packet-level logging with CRC validation for reverse engineering
 - **Raw Packet View** — Inspect all BLE traffic in hex
-- **CSV Export** — Record and export telemetry data
-- **Session Persistence** — Logs and telemetry survive page reloads
+- **CSV Export** — Record and export telemetry data over time
+- **Session Persistence** — Logs and telemetry survive page reloads via sessionStorage
 
 ## Protocol Details
 
 EcoFlow BLE devices use a binary protocol with two packet layers:
+
+### BLE Transport
+
+Devices expose two GATT characteristics:
+- **Write:** `00000002-0000-1000-8000-00805f9b34fb` (or Nordic UART `6e400002-...`)
+- **Notify:** `00000003-0000-1000-8000-00805f9b34fb` (or Nordic UART `6e400003-...`)
+
+Manufacturer ID `0xB5B5` is used for device filtering in BLE advertisements. The serial number is at bytes 1-17 of manufacturer data.
 
 ### Inner Packet (0xAA prefix, protocol v2)
 ```
@@ -47,6 +59,8 @@ EcoFlow BLE devices use a binary protocol with two packet layers:
 ```
 
 **XOR obfuscation:** If `seq[0] != 0`, each payload byte is XORed with `seq[0]`.
+
+**CRC algorithms:** CRC8-CCITT for header (4 bytes), CRC16-ARC for body.
 
 ### Encrypted Packet (0x5A5A prefix)
 ```
@@ -64,28 +78,30 @@ EcoFlow BLE devices use a binary protocol with two packet layers:
 
 **Type 7 (River 3, Delta 3, SHP2, DPU):**
 - ECDH SECP160r1 key exchange
+- Device sends seed (2 bytes) + srand (16 bytes)
 - Session key = MD5(login_key[seed] + srand)
 - IV = MD5(shared_key)
-- Requires `login_key.bin` from EcoFlow app
+- Auth = MD5(user_id + serial_number) as ASCII hex
+- Requires `login_key.bin` from EcoFlow Android APK
 
 ### River 2 Commands
-```
-AC toggle:   cmdSet=0x05, cmdId=0x42, payload=[enabled, xboost]
-DC 12V:      cmdSet=0x05, cmdId=0x51, payload=[enabled]
-Max charge:  cmdSet=0x03, cmdId=0x31, payload=[soc%]
-Min disch:   cmdSet=0x03, cmdId=0x33, payload=[soc%]
-AC charge:   cmdSet=0x05, cmdId=0x45, payload=[watts_LE, 0xFF]
-Quiet mode:  cmdSet=0x05, cmdId=0x53, payload=[enabled]
-```
+| Operation | cmdSet | cmdId | Payload |
+|-----------|--------|-------|---------|
+| AC toggle | 0x05 | 0x42 | [enabled, xboost] |
+| DC 12V toggle | 0x05 | 0x51 | [enabled] |
+| Max charge SOC | 0x03 | 0x31 | [soc%] (50-100) |
+| Min discharge SOC | 0x03 | 0x33 | [soc%] (0-30) |
+| AC charge speed | 0x05 | 0x45 | [watts_LE, 0xFF] |
+| Quiet mode | 0x05 | 0x53 | [enabled] |
 
-### Heartbeat Sources
-```
-PD:   src=0x02, cmdSet=0x20, cmdId=0x02 (~155B, battery/power/USB)
-EMS:  src=0x03, cmdSet=0x20, cmdId=0x02 (~46B, charge management)
-BMS:  src=0x03, cmdSet=0x20, cmdId=0x32 (~69B, cell data)
-INV:  src=0x04, cmdId=0x02 (AC input/output)
-MPPT: src=0x05, cmdSet=0x20, cmdId=0x02 (~80B, solar/DC input)
-```
+### Heartbeat Messages (device -> app)
+| Module | src | cmdSet | cmdId | Description |
+|--------|-----|--------|-------|-------------|
+| PD | 0x02 | 0x20 | 0x02 | Battery %, power I/O, USB ports (~155B) |
+| EMS | 0x03 | 0x20 | 0x02 | Charge state, SOC limits, time remaining (~46B) |
+| BMS | 0x03 | 0x20 | 0x32 | Cell voltage, current, temp, cycles, SOH (~69B) |
+| INV | 0x04 | — | 0x02 | AC input/output watts, voltage, X-Boost state |
+| MPPT | 0x05 | 0x20 | 0x02 | Solar voltage/current/power, DC input (~80B) |
 
 ## Development
 
@@ -105,10 +121,12 @@ npm run preview
 
 ## References
 
+- [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble) — Home Assistant EcoFlow BLE integration (most complete implementation)
 - [rabits/ef-ble-reverse](https://github.com/rabits/ef-ble-reverse) — EcoFlow BLE V2 protocol reverse engineering
-- [rabits/ha-ef-ble](https://github.com/rabits/ha-ef-ble) — Home Assistant EcoFlow BLE integration
-- [nielsole/ecoflow-bt-reverse-engineering](https://github.com/nielsole/ecoflow-bt-reverse-engineering) — BLE protocol research
+- [tolwi/hassio-ecoflow-cloud](https://github.com/tolwi/hassio-ecoflow-cloud) — MQTT cloud integration (River 2 command reference)
+- [nielsole/ecoflow-bt-reverse-engineering](https://github.com/nielsole/ecoflow-bt-reverse-engineering) — Early BLE protocol research
 - [npike/ha-ecoflow-ble](https://github.com/npike/ha-ecoflow-ble) — Simple HA BLE battery reader
+- [Kotsiubynskyi/ef-ble-wrapper](https://github.com/Kotsiubynskyi/ef-ble-wrapper) — Python BLE wrapper
 
 ## Disclaimer
 
