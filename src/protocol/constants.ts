@@ -341,6 +341,29 @@ export const PARAM_LABELS: Record<string, string> = {
   temp_sensor_4: 'Temp 4',
 };
 
+// Parameter units for display
+export const PARAM_UNITS: Record<string, string> = {
+  soc: '%', lcd_soc: '%', lcd_show_soc: '%', bms_soc: '%', bms_soh: '%',
+  max_charge_soc: '%', charge_limit: '%', discharge_limit: '%', min_dsg_soc: '%',
+  watts_out_sum: 'W', watts_in_sum: 'W', charge_watts: 'W', solar_watts: 'W',
+  ac_watts: 'W', ac_in_watts: 'W', mppt_watts: 'W',
+  usb1_watts: 'W', usb2_watts: 'W', usbc1_watts: 'W', usbc2_watts: 'W',
+  qc1_watts: 'W', qc2_watts: 'W', car_watts: 'W',
+  inv_input_watts: 'W', inv_output_watts: 'W', inv_ac_watts: 'W',
+  mppt_in_watts: 'W', mppt_out_watts: 'W', dc_in_watts: 'W',
+  temperature: '\u00b0C', inv_temperature: '\u00b0C', bms_temp: '\u00b0C',
+  mppt_temp: '\u00b0C',
+  temp_sensor_1: '\u00b0C', temp_sensor_2: '\u00b0C', temp_sensor_3: '\u00b0C', temp_sensor_4: '\u00b0C',
+  full_cap_wh: 'Wh', remain_cap: 'Wh', full_cap: 'Wh',
+  bms_voltage: 'mV', bms_current: 'mA', inv_out_vol: 'mV',
+  mppt_in_vol: 'mV', mppt_in_amp: 'mA', mppt_out_vol: 'mV', mppt_out_amp: 'mA',
+  dc_in_vol: 'mV', dc_in_amp: 'mA',
+  remain_time: 'min', remain_mins_1: 'min', remain_mins_2: 'min',
+  full_cap_mins: 'min', chg_remain_time: 'min', dsg_remain_time: 'min',
+  total_out_kwh: 'kWh', total_in_kwh: 'kWh',
+  total_out_kwh_2: 'kWh', total_in_kwh_2: 'kWh',
+};
+
 // Parameter groups for display
 export const PARAM_GROUPS: Record<string, string[]> = {
   'Battery': ['soc', 'lcd_soc', 'lcd_show_soc', 'remain_time', 'remain_mins_1', 'remain_mins_2', 'full_cap_mins', 'chg_remain_time', 'dsg_remain_time', 'chg_state', 'max_charge_soc', 'charge_limit', 'min_dsg_soc', 'discharge_limit', 'full_cap_wh'],

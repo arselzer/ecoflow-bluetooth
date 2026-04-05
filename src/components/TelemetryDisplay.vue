@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { PARAM_LABELS, PARAM_GROUPS } from '../protocol';
+import { PARAM_LABELS, PARAM_GROUPS, PARAM_UNITS } from '../protocol';
 import type { TelemetryData } from '../protocol';
 
 const props = defineProps<{
@@ -97,9 +97,11 @@ const displayGroups = computed(() => {
   return groups;
 });
 
-function formatValue(val: string | number): string {
+function formatValue(val: string | number, key: string): string {
+  const unit = PARAM_UNITS[key] ?? '';
   if (typeof val === 'number') {
-    return Number.isInteger(val) ? val.toString() : val.toFixed(1);
+    const num = Number.isInteger(val) ? val.toString() : val.toFixed(1);
+    return unit ? `${num} ${unit}` : num;
   }
   return String(val);
 }
@@ -127,7 +129,7 @@ function formatValue(val: string | number): string {
       <div class="param-grid">
         <div v-for="param in group.params" :key="param.key" class="param">
           <span class="param-label">{{ param.label }}</span>
-          <span class="param-value">{{ formatValue(param.value) }}</span>
+          <span class="param-value">{{ formatValue(param.value, param.key) }}</span>
         </div>
       </div>
     </div>

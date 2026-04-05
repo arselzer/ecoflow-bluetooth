@@ -4,6 +4,8 @@ A web-based tool for local Bluetooth Low Energy (BLE) control and monitoring of 
 
 Built with Vue 3 + TypeScript + Vite, using the Web Bluetooth API. Tested on River 3 Plus with live telemetry and AC/DC control.
 
+> **Warning:** Connecting to an unbound device will automatically **bind your user hash** to it via the BLE bind command (`0x35:85`). This registers a user on the device so that authentication succeeds. The bind is reversible (factory reset clears it), but be aware that a device bound this way may reject authentication from the official EcoFlow app until re-bound. See the [Compatibility](#compatibility-with-ecoflow-app--home-assistant) section for details.
+
 ## Supported Devices
 
 **Type 1 encryption (River 2 / Delta 2):**

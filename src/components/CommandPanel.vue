@@ -27,16 +27,6 @@ function queryBindStatus() {
   emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Array(0));
 }
 
-// Try unbind candidates
-function tryUnbind84empty() { emit('command', 0x21, 0x35, 0x35, 0x84, new Uint8Array(0)); }
-function tryUnbind84hash() {
-  const uid = props.userId || '0000000000000000';
-  const sn = props.serialNumber || 'unknown';
-  emit('command', 0x21, 0x35, 0x35, 0x84, generateAuthPayload(uid, sn));
-}
-function tryUnbind85zero() { emit('command', 0x21, 0x35, 0x35, 0x85, new Uint8Array([0x00])); }
-function tryUnbind87empty() { emit('command', 0x21, 0x35, 0x35, 0x87, new Uint8Array(0)); }
-function tryUnbind88empty() { emit('command', 0x21, 0x35, 0x35, 0x88, new Uint8Array(0)); }
 
 // River 3 config commands — protobuf ConfigWrite via cmdSet=0xFE, cmdId=0x11, version=0x13
 // Packet: src=0x20, dst=0x02
@@ -115,9 +105,9 @@ function sendRawHex() {
 
     <template v-else>
       <div class="warning">
-        Commands are based on reverse-engineered protocol (rabits/ha-ef-ble).
-        AC/DC toggles verified on River 2 series. Other devices may differ.
-        Use with caution — some commands could affect device operation.
+        Commands are based on reverse-engineered protocol. River 3 AC/DC/X-Boost
+        controls tested and working. Use with caution — commands directly control
+        device outputs.
       </div>
 
       <div class="section">
@@ -130,15 +120,6 @@ function sendRawHex() {
         <div class="button-grid">
           <button class="cmd-btn bind" @click="queryBindStatus">Query Status (85 empty)</button>
           <button class="cmd-btn bind" @click="tryBind">Bind (85 + hash)</button>
-        </div>
-        <h4>Unbind Discovery</h4>
-        <p class="hint">Try nearby cmdIds to find an unbind command. Check Log tab for responses.</p>
-        <div class="button-grid">
-          <button class="cmd-btn unbind" @click="tryUnbind84empty">84 empty</button>
-          <button class="cmd-btn unbind" @click="tryUnbind84hash">84 + hash</button>
-          <button class="cmd-btn unbind" @click="tryUnbind85zero">85 + 0x00</button>
-          <button class="cmd-btn unbind" @click="tryUnbind87empty">87 empty</button>
-          <button class="cmd-btn unbind" @click="tryUnbind88empty">88 empty</button>
         </div>
       </div>
 
@@ -300,11 +281,6 @@ h4 {
 .cmd-btn.bind {
   border-color: #a855f7;
   color: #a855f7;
-}
-
-.cmd-btn.unbind {
-  border-color: #f59e0b;
-  color: #f59e0b;
 }
 
 .hint {

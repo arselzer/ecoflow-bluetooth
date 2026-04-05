@@ -110,6 +110,67 @@ This caused inconsistent auth results that masked the real error.
 | 0x35 | 0x35 | 0x86 | app->device | Authenticate user |
 | 0x35 | 0x35 | 0x89 | app->device | Query auth status |
 
+## River 3 Control Commands (Confirmed Working)
+
+Config commands use protobuf `ConfigWrite` messages:
+- **Packet format:** `Packet(src=0x20, dst=0x02, cmdSet=0xFE, cmdId=0x11, version=0x13)`
+- **Payload:** Protobuf-encoded ConfigWrite message
+
+### Protobuf Field Numbers (from pr705_pb2.py)
+
+| Field # | Name | Type | Description |
+|---------|------|------|-------------|
+| 76 | cfg_ac_out_open | bool | AC output on/off — **CONFIRMED WORKING** |
+| 20 | cfg_dc_out_open | bool | DC output on/off |
+| 18 | cfg_dc_12v_out_open | bool | 12V car port on/off |
+| 25 | cfg_xboost_en | bool | X-Boost on/off |
+| 33 | cfg_max_chg_soc | uint32 | Max charge SOC (%) |
+| 34 | cfg_min_dsg_soc | uint32 | Min discharge SOC (%) |
+| 87 | cfg_plug_in_info_pv_dc_amp_max | uint32 | DC charge max amps |
+| 11 | cfg_dc_standby_time | uint32 | DC standby timeout |
+| 15 | cfg_hv_ac_out_open | bool | HV AC output |
+| 16 | cfg_lv_ac_out_open | bool | LV AC output |
+| 17 | cfg_ac_out_freq | uint32 | AC output frequency |
+| 19 | cfg_usb_open | bool | USB ports on/off |
+| 23 | cfg_ac_out_always_on | message | AC always-on config |
+
+### Telemetry Protobuf Fields (cmd=fe:15, from live capture)
+
+| Field # | Name | Confirmed Value | Description |
+|---------|------|----------------|-------------|
+| 8 | soc | 50 | Battery percentage |
+| 17 | full_cap_mins | 1440 | Full capacity in minutes |
+| 18 | remain_mins_1 | 300 | Remaining time 1 |
+| 19 | remain_mins_2 | 720 | Remaining time 2 |
+| 22 | watts_out_sum | 0 | Total output watts |
+| 23 | output_count | 5 | Number of output ports |
+| 25 | ac_enabled | 0/1 | AC output state — changes on command |
+| 37 | watts_in_sum | 0 | Total input watts |
+| 195 | dc_enabled | 1 | DC output state |
+| 211 | lcd_soc | 50 | LCD displayed SOC |
+| 212 | charge_watts | 0 | Charge power |
+| 227 | bms_cycles | 230 | Battery cycle count |
+| 242 | temperature | 26.0 | Temperature (float32, °C) |
+| 243 | max_charge_soc | 100.0 | Max charge (float32) |
+| 248 | full_cap_wh | 12800 | Full capacity Wh |
+| 254 | total_out_kwh | 87 | Total output energy |
+| 255 | total_in_kwh | 5939 | Total input energy |
+| 258-261 | temp_sensor_1-4 | 25,26,25,25 | Temperature sensors (°C) |
+| 262 | inv_temperature | 26.0 | Inverter temp (float32, °C) |
+| 263 | bms_soh | 100.0 | Battery health (float32, %) |
+| 270 | charge_limit | 100 | Charge limit % |
+| 271 | discharge_limit | 0 | Discharge limit % |
+| 359 | solar_watts | 80 | Solar input (W) |
+
+### Important Protocol Notes
+
+- **Serial number matters for auth:** The full 16-char serial from the device sticker (e.g., `R631ZE1AWH550256`) must be used. The BLE name (`EF-R3P50256`) is truncated and produces a wrong auth hash.
+- **Bind persists across connections:** Once bound, the device remembers the user hash across power cycles. Reconnecting reuses the same bind.
+- **Bind before auth:** The bind command (0x35:85) must be sent BEFORE authentication (0x35:86). Auth without bind returns `NeedBindInstallFirst (0x04)`.
+- **XOR only for v19 packets:** v3 auth packets do NOT use XOR obfuscation. v19 (0x13) telemetry packets DO. Mixing this up corrupts auth error codes.
+- **Packet replies keep connection alive:** Device disconnects if received packets are not echoed back with swapped src/dst.
+- **watchAdvertisements() not available:** Chrome on some platforms doesn't support reading manufacturer data from BLE advertisements. Serial must be entered manually.
+
 ## BLE Connection Notes
 
 - **GATT service:** `00000001-0000-1000-8000-00805f9b34fb`
